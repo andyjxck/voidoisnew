@@ -489,18 +489,22 @@ static void icon_dsc_init(void)
     icon_dsc_ready = 1;
 }
 
-/* per-tile icon index for on/off states */
-static const uint8_t tile_icon[7][2] = {
-    {9, 0},   /* DND:      off -> dnd_off,      on -> dnd_on   */
-    {10, 1},  /* AIR:      off -> airplane_off, on -> flight   */
-    {11, 2},  /* BT:       off -> bt_off,       on -> bt       */
-    {12, 3},  /* TORCH:    off -> torch_off,    on -> torch_on */
-    {4, 4},   /* PHONE:    mobile_vibrate both ways             */
-    {5, 5},   /* LOCK:     water_drop both ways                 */
-    {6, 6},   /* SETTINGS                                     */
+/* vector app/control glyphs — no PNG assets needed */
+enum {
+    G_WORKOUT, G_CARDIO, G_STATS, G_SLEEP, G_WATER, G_CLOCK,
+    G_ALERTS, G_SETTINGS, G_DIAG, G_PHONE,
+    G_BATT, G_SUN, G_BT, G_PLANE, G_TORCH, G_STEPS, G_BOLT
 };
+static void hex_stroke(lv_layer_t *layer, int cx, int cy, int r,
+                       lv_color_t c, int w);
+static void seg_bar(lv_layer_t *layer, int x, int y, int w, int h,
+                    int segs, int pct, lv_color_t on, lv_color_t off);
+static void draw_txt_c(lv_layer_t *layer, const lv_font_t *f, lv_color_t c,
+                       int cx, int y, const char *s);
+static void draw_glyph(lv_layer_t *layer, int g, int cx, int cy, int s,
+                       lv_color_t c);
 
-/* positional icon by raw icon_alpha index — for capsules and stats */
+/* positional icon by raw icon_alpha index — for badges and empty states */
 static lv_obj_t *mk_icon_at(lv_obj_t *parent, int idx, int on, int x, int y)
 {
     if (!icon_dsc_ready)
@@ -513,56 +517,197 @@ static lv_obj_t *mk_icon_at(lv_obj_t *parent, int idx, int on, int x, int y)
     return img;
 }
 
-/* ---- control centre ------------------------------------------------------ */
+/* ---- control centre ------------------------------------------------------
+   A focus wheel like the apps screen: satellites pick the control, the
+   centre hex IS the control — battery shows its gauge, brightness shows
+   the segmented bar, toggles show ON/OFF. cc_hide bitmask (1=torch,
+   2=water lock, 4=phone) drops controls out of the ring entirely. */
+enum { CCW_BATT, CCW_BRIGHT, CCW_DND, CCW_BT, CCW_AIR, CCW_TORCH,
+       CCW_PHONE, CCW_LOCK, CCW_SET, CCW_DEFN };
+static const struct { const char *name; int glyph; lv_color_t col; }
+    ccw_def[CCW_DEFN] = {
+    {"BATT",    G_BATT,     LV_COLOR_MAKE(0x46,0xD8,0xE0)},
+    {"BRIGHT",  G_SUN,      LV_COLOR_MAKE(0xF0,0xD0,0x40)},
+    {"DND",     G_SLEEP,    LV_COLOR_MAKE(0x70,0x40,0xC8)},
+    {"BT",      G_BT,       LV_COLOR_MAKE(0x28,0x70,0xDC)},
+    {"AIR",     G_PLANE,    LV_COLOR_MAKE(0xDC,0x82,0x1E)},
+    {"TORCH",   G_TORCH,    LV_COLOR_MAKE(0xC8,0xA0,0x1E)},
+    {"ALERTS",  G_PHONE,    LV_COLOR_MAKE(0x28,0x70,0xDC)},
+    {"WTR LCK", G_WATER,    LV_COLOR_MAKE(0x1E,0x96,0xBE)},
+    {"SETTING", G_SETTINGS, LV_COLOR_MAKE(0x8A,0x94,0xA8)},
+};
+static int ccw_list[CCW_DEFN], ccw_n, ccw_focus;
+static lv_obj_t *ccw_canvas;
+static lv_point_t ccw_press;
+static int ccw_dx, ccw_drag;
 
-static int cc_state(int i)
+static int ccw_on(int d)
 {
-    switch (i) {
-    case 0: return dnd_on;
-    case 1: return airplane_on;
-    case 2: return bt_on;
-    case 3: return torch_on;
-    case 4: return ble_connected();
-    case 5: return water_lock;
+    switch (d) {
+    case CCW_BATT:   return 1;
+    case CCW_BRIGHT: return brightness >= 50;
+    case CCW_DND:    return dnd_on;
+    case CCW_BT:     return bt_on;
+    case CCW_AIR:    return airplane_on;
+    case CCW_TORCH:  return torch_on;
+    case CCW_PHONE:  return ble_connected();
+    case CCW_LOCK:   return water_lock;
     }
     return 0;
 }
 
-/* active tint per tile — the simulator honeycomb colours */
-static lv_color_t cc_tint(int i)
+static void ccw_activate(int d)
 {
-    switch (i) {
-    case 0: return lv_color_hex(0x7040C8);   /* dnd: purple   */
-    case 1: return lv_color_hex(0xDC821E);   /* air: orange   */
-    case 2: return lv_color_hex(0x2870DC);   /* bt: blue      */
-    case 3: return lv_color_hex(0xC8A01E);   /* torch: amber  */
-    case 4: return lv_color_hex(0x2870DC);   /* phone: blue   */
-    case 5: return lv_color_hex(0x1E96BE);   /* lock: teal    */
+    switch (d) {
+    case CCW_BRIGHT:
+        brightness = brightness >= 100 ? 25 : brightness + 25;
+        if (!torch_on)
+            display_backlight(bl_level());
+        break;
+    case CCW_DND:
+        dnd_on ^= 1;
+        break;
+    case CCW_BT:
+        bt_on ^= 1;
+        if (bt_on)
+            airplane_on = 0;
+        apply_radio();
+        break;
+    case CCW_AIR:
+        airplane_on ^= 1;
+        apply_radio();
+        break;
+    case CCW_TORCH:
+        torch_on ^= 1;
+        display_backlight(bl_level());
+        break;
+    case CCW_PHONE:
+        nav_to(SCR_NOTIF);
+        return;
+    case CCW_LOCK:
+        water_lock ^= 1;
+        break;
+    case CCW_SET:
+        nav_to(SCR_SETTINGS);
+        return;
+    default:
+        return;
     }
-    return lv_color_hex(0x28303C);           /* settings grey */
+    persist_mark();
+    lv_obj_invalidate(ccw_canvas);
 }
 
-/* honeycomb layout: cx, cy, tile — concept comb: battery top-left,
-   DND top-right, triple rows below; -2 = battery (display only)
-   (int16: coords > 127 overflow an int8 and wrap hexes off-screen) */
-#define CC_HEXN 8
-static const int16_t cc_hexpos[CC_HEXN][3] = {
-    { 84,  64, -2}, {156,  64, 0},              /* BATT, DND         */
-    { 64, 112,  2}, {120, 112, 6}, {176, 112, 1}, /* BT, SETTING, AIR */
-    { 64, 162,  3}, {120, 162, 4}, {176, 162, 5}  /* TORCH, PHONE, LCK */
-};
-static const char *cc_name(int t)
+static void ccw_build_list(void)
 {
-    switch (t) {
-    case -2: return "BATT";
-    case 0:  return "DND";
-    case 1:  return "AIRPLANE";
-    case 2:  return "BLUETOOTH";
-    case 3:  return "TORCH";
-    case 4:  return "PHONE";
-    case 5:  return "WTR LCK";
+    ccw_n = 0;
+    for (int i = 0; i < CCW_DEFN; i++) {
+        if ((i == CCW_TORCH && (cc_hide & 1)) ||
+            (i == CCW_LOCK  && (cc_hide & 2)) ||
+            (i == CCW_PHONE && (cc_hide & 4)))
+            continue;
+        ccw_list[ccw_n++] = i;
     }
-    return "SETTING";
+    if (ccw_focus >= ccw_n)
+        ccw_focus = 0;
+}
+
+static void ccw_pos(int i, int *x, int *y)
+{
+    float a = (-90.0f + i * (360.0f / ccw_n)) * 0.0174533f;
+    *x = 120 + (int)(cosf(a) * 92);
+    *y = 120 + (int)(sinf(a) * 66);
+}
+
+static void ccw_draw(lv_event_t *e)
+{
+    lv_layer_t *layer = lv_event_get_layer(e);
+    int fd = ccw_list[ccw_focus];
+    lv_color_t fc = ccw_def[fd].col;
+    for (int i = 0; i < ccw_n; i++) {
+        int x, y, d = ccw_list[i];
+        int on = ccw_on(d), foc = i == ccw_focus;
+        ccw_pos(i, &x, &y);
+        lv_color_t sc = foc ? ccw_def[d].col
+                            : (on ? lv_color_mix(ccw_def[d].col,
+                                                 lv_color_black(), 120)
+                                  : lv_color_hex(0x38425A));
+        hex_stroke(layer, x, y, foc ? 16 : 13, sc, foc ? 2 : 1);
+        draw_glyph(layer, ccw_def[d].glyph, x, y, 6,
+                   on || foc ? ccw_def[d].col : lv_color_hex(0x5A6478));
+    }
+    /* hub = the focused control itself, not just a bigger icon */
+    hex_stroke(layer, 120, 120, 52, fc, 2);
+    hex_stroke(layer, 120, 120, 47,
+               lv_color_mix(fc, lv_color_black(), 170), 1);
+    draw_glyph(layer, ccw_def[fd].glyph, 120, 94, 11, fc);
+    draw_txt_c(layer, &kenney9, lv_color_hex(0x8A94A8), 120, 108,
+               ccw_def[fd].name);
+    char v[12];
+    if (fd == CCW_BATT)
+        lv_snprintf(v, sizeof v, "%d%%", hal_battery_pct());
+    else if (fd == CCW_BRIGHT)
+        lv_snprintf(v, sizeof v, "%d%%", brightness);
+    else if (fd == CCW_SET)
+        lv_snprintf(v, sizeof v, "OPEN");
+    else if (fd == CCW_PHONE)
+        lv_snprintf(v, sizeof v, "%s", ccw_on(fd) ? "LINKED" : "OPEN");
+    else
+        lv_snprintf(v, sizeof v, "%s", ccw_on(fd) ? "ON" : "OFF");
+    draw_txt_c(layer, &kenney16, ccw_on(fd) ? fc : C_MUTED, 120, 122, v);
+    if (fd == CCW_BRIGHT)
+        seg_bar(layer, 76, 144, 88, 7, 10, brightness, fc,
+                lv_color_hex(0x232C3C));
+    else if (fd == CCW_BATT)
+        seg_bar(layer, 76, 144, 88, 7, 10, hal_battery_pct(), fc,
+                lv_color_hex(0x232C3C));
+    draw_txt_c(layer, &kenney9, lv_color_hex(0x38425A), 120, 226,
+               "DRAG TO SELECT - TAP CENTRE");
+}
+
+static void ccw_event(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_indev_t *in = lv_indev_active();
+    if (code == LV_EVENT_PRESSED) {
+        ccw_dx = ccw_drag = 0;
+        if (in)
+            lv_indev_get_point(in, &ccw_press);
+    } else if (code == LV_EVENT_PRESSING && in) {
+        lv_point_t v;
+        lv_indev_get_vect(in, &v);
+        ccw_dx += v.x;
+        ccw_drag += (v.x < 0 ? -v.x : v.x) + (v.y < 0 ? -v.y : v.y);
+        while (ccw_dx > 30) {
+            ccw_dx -= 30;
+            ccw_focus = (ccw_focus + 1) % ccw_n;
+            lv_obj_invalidate(ccw_canvas);
+        }
+        while (ccw_dx < -30) {
+            ccw_dx += 30;
+            ccw_focus = (ccw_focus + ccw_n - 1) % ccw_n;
+            lv_obj_invalidate(ccw_canvas);
+        }
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        ccw_dx = 0;
+        if (ccw_drag >= 10)
+            return;
+        int dx = ccw_press.x - 120, dy = ccw_press.y - 120;
+        if (dx * dx + dy * dy < 56 * 56) {
+            ccw_activate(ccw_list[ccw_focus]);   /* hub tap = act */
+            return;
+        }
+        for (int i = 0; i < ccw_n; i++) {
+            int x, y;
+            ccw_pos(i, &x, &y);
+            dx = ccw_press.x - x;
+            dy = ccw_press.y - y;
+            if (dx * dx + dy * dy < 22 * 22) {
+                ccw_focus = i;          /* satellites only focus */
+                lv_obj_invalidate(ccw_canvas);
+                return;
+            }
+        }
+    }
 }
 
 /* ---- shared VoidOS draw language ---------------------------------------------
@@ -627,12 +772,7 @@ static void draw_txt_c(lv_layer_t *layer, const lv_font_t *f, lv_color_t c,
     draw_txt(layer, f, c, cx - 100, y, 200, s, LV_TEXT_ALIGN_CENTER);
 }
 
-/* vector app glyphs — no PNG assets needed; each ~size s centred on cx,cy */
-enum {
-    G_WORKOUT, G_CARDIO, G_STATS, G_SLEEP, G_WATER, G_CLOCK,
-    G_ALERTS, G_SETTINGS, G_DIAG, G_PHONE
-};
-
+/* each glyph ~size s centred on cx,cy */
 static void draw_glyph(lv_layer_t *layer, int g, int cx, int cy, int s,
                        lv_color_t c)
 {
@@ -816,160 +956,134 @@ static void draw_glyph(lv_layer_t *layer, int g, int cx, int cy, int s,
         lv_draw_line(layer, &ln);
         break;
     }
-    }
-}
-
-/* pointy-top hexagon (apex at top and bottom), the simulator shape:
-   full width for the middle half, tapering to a point at ±R */
-static void hex_fill(lv_layer_t *layer, int cx, int cy, int r,
-                     lv_color_t c)
-{
-    int hw_r = r * 866 / 1000;            /* apothem, R * 0.866 */
-    lv_draw_line_dsc_t dsc;
-    lv_draw_line_dsc_init(&dsc);
-    dsc.color = c;
-    dsc.opa = LV_OPA_COVER;
-    for (int dy = -r + 1; dy <= r - 1; dy++) {
-        int ay = dy < 0 ? -dy + 1 : dy + 1;
-        int hw = ay <= r / 2 ? hw_r : hw_r * (2 * r - 2 * ay) / r;
-        if (hw < 1)
-            continue;
-        dsc.p1.x = cx - hw;
-        dsc.p2.x = cx + hw;
-        dsc.p1.y = dsc.p2.y = cy + dy;
-        lv_draw_line(layer, &dsc);
-    }
-}
-
-/* one draw pass paints the whole control centre — outlined comb,
-   segmented brightness bar — the same proven pattern as the face's
-   dial_draw */
-static void cc_draw(lv_event_t *e)
-{
-    lv_layer_t *layer = lv_event_get_layer(e);
-    for (int i = 0; i < CC_HEXN; i++) {
-        int t = cc_hexpos[i][2];
-        if ((t == 3 && (cc_hide & 1)) || (t == 4 && (cc_hide & 4)) ||
-            (t == 5 && (cc_hide & 2)))
-            continue;
-        int on = t == -2 || cc_state(t);
-        lv_color_t oc = t == -2 ? C_ACCENT
-                                : (cc_state(t) ? cc_tint(t)
-                                               : lv_color_hex(0x38425A));
-        int cx = cc_hexpos[i][0], cy = cc_hexpos[i][1];
-        if (cc_state(t))
-            hex_fill(layer, cx, cy, 27, lv_color_mix(cc_tint(t),
-                                                     lv_color_black(), 200));
-        hex_stroke(layer, cx, cy, 28, oc, on ? 2 : 1);
-        char nb[12];
-        if (t == -2)
-            lv_snprintf(nb, sizeof nb, "%d%%", hal_battery_pct());
-        else
-            nb[0] = 0;
-        draw_txt_c(layer, &kenney9,
-                   t == -2 ? C_ACCENT
-                           : (cc_state(t) ? C_WHITE : lv_color_hex(0x5A6478)),
-                   cx, cy + 10, nb[0] ? nb : cc_name(t));
-    }
-    /* segmented brightness bar + %, the concept's bottom strip */
-    seg_bar(layer, 30, 208, 150, 8, 10, brightness, C_ACCENT,
-            lv_color_hex(0x232C3C));
-    char bb[8];
-    lv_snprintf(bb, sizeof bb, "%d%%", brightness);
-    draw_txt(layer, &kenney9, C_ACCENT, 188, 206, 40, bb,
-             LV_TEXT_ALIGN_RIGHT);
-}
-
-static void cc_cb(lv_event_t *e)
-{
-    if (lv_event_get_user_data(e)) {   /* brightness capsule: tap steps */
-        brightness = brightness >= 100 ? 25 : brightness + 25;
-        if (!torch_on)
-            display_backlight(1 + brightness * 2 / 100);
-        persist_mark();
-        rebuild();
-        return;
-    }
-    int i = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
-    switch (i) {
-    case 0: dnd_on ^= 1; break;
-    case 1:
-        airplane_on ^= 1;
-        apply_radio();
+    case G_BATT: {                       /* body + tip + two-thirds fill */
+        lv_draw_rect_dsc_t bo;
+        lv_draw_rect_dsc_init(&bo);
+        bo.border_width = 2;
+        bo.border_color = c;
+        bo.border_opa = LV_OPA_COVER;
+        bo.bg_opa = LV_OPA_TRANSP;
+        lv_area_t bb = {cx - s, cy - s / 2, cx + s - 4, cy + s / 2};
+        lv_draw_rect(layer, &bo, &bb);
+        lv_area_t tp = {cx + s - 3, cy - s / 4, cx + s - 1, cy + s / 4};
+        lv_draw_rect(layer, &rc, &tp);
+        lv_area_t fl = {cx - s + 2, cy - s / 2 + 2,
+                        cx - s + 1 + (s * 2 - 8) * 2 / 3, cy + s / 2 - 2};
+        lv_draw_rect(layer, &rc, &fl);
         break;
-    case 3:
-        torch_on ^= 1;
-        display_backlight(torch_on ? 3 : 1 + brightness * 2 / 100);
-        break;
-    case 2:
-        bt_on ^= 1;
-        if (bt_on)
-            airplane_on = 0;     /* explicitly enabling BT leaves airplane */
-        apply_radio();
-        break;
-    case 4:
-        nav_to(SCR_NOTIF);
-        return;                     /* phone tile = notifications   */
-    case 5: water_lock ^= 1; break;
-    case 6:
-        nav_to(SCR_SETTINGS);
-        return;
-    default: break;
     }
-    persist_mark();
-    rebuild();
+    case G_SUN: {                        /* filled disc + rays */
+        lv_draw_arc_dsc_t ar;
+        lv_draw_arc_dsc_init(&ar);
+        ar.center.x = cx;
+        ar.center.y = cy;
+        ar.radius = s / 2;
+        ar.width = s / 2;
+        ar.color = c;
+        ar.start_angle = 0;
+        ar.end_angle = 360;
+        lv_draw_arc(layer, &ar);
+        for (int i = 0; i < 8; i++) {
+            float a = i * 0.7853982f;
+            ln.p1.x = cx + (int)(cosf(a) * (s * 3 / 4));
+            ln.p1.y = cy + (int)(sinf(a) * (s * 3 / 4));
+            ln.p2.x = cx + (int)(cosf(a) * s);
+            ln.p2.y = cy + (int)(sinf(a) * s);
+            lv_draw_line(layer, &ln);
+        }
+        break;
+    }
+    case G_BT: {                         /* rune: spine + two triangles */
+        ln.p1.x = cx; ln.p1.y = cy - s;
+        ln.p2.x = cx; ln.p2.y = cy + s;
+        lv_draw_line(layer, &ln);
+        int ax = cx + s * 2 / 3;
+        ln.p1.x = cx; ln.p1.y = cy - s;
+        ln.p2.x = ax; ln.p2.y = cy - s / 2;
+        lv_draw_line(layer, &ln);
+        ln.p1.x = ax; ln.p1.y = cy - s / 2;
+        ln.p2.x = cx; ln.p2.y = cy;
+        lv_draw_line(layer, &ln);
+        ln.p1.x = cx; ln.p1.y = cy;
+        ln.p2.x = ax; ln.p2.y = cy + s / 2;
+        lv_draw_line(layer, &ln);
+        ln.p1.x = ax; ln.p1.y = cy + s / 2;
+        ln.p2.x = cx; ln.p2.y = cy + s;
+        lv_draw_line(layer, &ln);
+        break;
+    }
+    case G_PLANE: {                      /* top-down plane: triangle + spine */
+        ln.p1.x = cx;     ln.p1.y = cy - s;
+        ln.p2.x = cx - s; ln.p2.y = cy + s * 2 / 3;
+        lv_draw_line(layer, &ln);
+        ln.p2.x = cx + s;
+        lv_draw_line(layer, &ln);
+        ln.p1.x = cx - s; ln.p1.y = cy + s * 2 / 3;
+        lv_draw_line(layer, &ln);
+        ln.p1.x = cx;     ln.p1.y = cy - s;
+        ln.p2.x = cx;     ln.p2.y = cy + s * 2 / 3;
+        lv_draw_line(layer, &ln);
+        break;
+    }
+    case G_TORCH: {                      /* flashlight silhouette + rays */
+        lv_area_t hd = {cx - s / 2, cy - s, cx + s / 2, cy - s / 3};
+        lv_area_t bd = {cx - s / 4, cy - s / 3, cx + s / 4, cy + s};
+        lv_draw_rect(layer, &rc, &hd);
+        lv_draw_rect(layer, &rc, &bd);
+        for (int i = -1; i <= 1; i++) {
+            ln.p1.x = ln.p2.x = cx + i * (s / 2);
+            ln.p1.y = cy - s - 2;
+            ln.p2.y = cy - s - 6;
+            lv_draw_line(layer, &ln);
+        }
+        break;
+    }
+    case G_STEPS: {                      /* footprint: sole + heel */
+        lv_draw_arc_dsc_t ar;
+        lv_draw_arc_dsc_init(&ar);
+        ar.color = c;
+        ar.start_angle = 0;
+        ar.end_angle = 360;
+        ar.center.x = cx - s / 4;
+        ar.center.y = cy - s / 3;
+        ar.radius = s / 2;
+        ar.width = s / 2;
+        lv_draw_arc(layer, &ar);
+        ar.center.x = cx + s / 5;
+        ar.center.y = cy + s / 2;
+        ar.radius = s * 2 / 5;
+        ar.width = s * 2 / 5;
+        lv_draw_arc(layer, &ar);
+        break;
+    }
+    case G_BOLT: {                       /* lightning zigzag */
+        const int bx[4] = {cx + s / 4, cx - s / 3, cx + s / 8, cx - s / 4};
+        const int by[4] = {cy - s, cy + s / 8, cy + s / 8, cy + s};
+        for (int i = 0; i < 3; i++) {
+            ln.p1.x = bx[i]; ln.p1.y = by[i];
+            ln.p2.x = bx[i + 1]; ln.p2.y = by[i + 1];
+            lv_draw_line(layer, &ln);
+        }
+        break;
+    }
+    }
 }
 
 static void build_cc(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "CONTROL", 0);
-
-    /* one canvas paints the whole comb + brightness bar, like the
-       face's dial layer — per-hex draw objects proved fragile */
-    lv_obj_t *bg = lv_obj_create(r);
-    lv_obj_set_pos(bg, 0, 0);
-    lv_obj_set_size(bg, 240, 240);
-    lv_obj_set_style_bg_opa(bg, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(bg, 0, 0);
-    lv_obj_set_style_pad_all(bg, 0, 0);
-    lv_obj_remove_flag(bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(bg, cc_draw, LV_EVENT_DRAW_MAIN, NULL);
-
-    /* icon in each hex above the canvas-drawn label */
-    for (int i = 0; i < CC_HEXN; i++) {
-        int t = cc_hexpos[i][2];
-        if (t == -2) {
-            mk_icon_at(r, 8, 1, cc_hexpos[i][0] - 12, cc_hexpos[i][1] - 20);
-            continue;
-        }
-        if ((t == 3 && (cc_hide & 1)) || (t == 4 && (cc_hide & 4)) ||
-            (t == 5 && (cc_hide & 2)))
-            continue;
-        lv_obj_t *ic = mk_icon_at(r, tile_icon[t][cc_state(t) != 0], 0,
-                                  cc_hexpos[i][0] - 12, cc_hexpos[i][1] - 20);
-        lv_obj_set_style_image_recolor(ic, cc_state(t) ? C_WHITE
-                                                       : C_MUTED, 0);
-        lv_obj_t *hx = lv_obj_create(r);
-        lv_obj_set_pos(hx, cc_hexpos[i][0] - 26, cc_hexpos[i][1] - 28);
-        lv_obj_set_size(hx, 52, 56);
-        lv_obj_set_style_bg_opa(hx, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(hx, 0, 0);
-        lv_obj_set_style_pad_all(hx, 0, 0);
-        lv_obj_remove_flag(hx, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_user_data(hx, (void *)(intptr_t)t);
-        lv_obj_add_event_cb(hx, cc_cb, LV_EVENT_CLICKED, NULL);
-    }
-
-    /* invisible tap target over the segmented brightness bar */
-    lv_obj_t *btap = lv_obj_create(r);
-    lv_obj_set_pos(btap, 20, 198);
-    lv_obj_set_size(btap, 200, 24);
-    lv_obj_set_style_bg_opa(btap, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(btap, 0, 0);
-    lv_obj_set_style_pad_all(btap, 0, 0);
-    lv_obj_remove_flag(btap, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(btap, cc_cb, LV_EVENT_CLICKED, (void *)1);
+    ccw_build_list();
+    ccw_canvas = lv_obj_create(r);
+    lv_obj_set_pos(ccw_canvas, 0, 0);
+    lv_obj_set_size(ccw_canvas, 240, 240);
+    lv_obj_set_style_bg_opa(ccw_canvas, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ccw_canvas, 0, 0);
+    lv_obj_set_style_pad_all(ccw_canvas, 0, 0);
+    lv_obj_remove_flag(ccw_canvas, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(ccw_canvas, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(ccw_canvas, ccw_draw, LV_EVENT_DRAW_MAIN, NULL);
+    lv_obj_add_event_cb(ccw_canvas, ccw_event, LV_EVENT_ALL, NULL);
 }
 
 /* ---- launcher ------------------------------------------------------------- */
@@ -1025,8 +1139,8 @@ static void lc_draw(lv_event_t *e)
                                                 lv_color_black(), 170)
                                  : lv_color_hex(0x232C3C);
         ln.width = 1;
-        ln.p1.x = 120 + (int)(dx / d * 50);
-        ln.p1.y = 120 + (int)(dy / d * 50);
+        ln.p1.x = 120 + (int)(dx / d * 60);
+        ln.p1.y = 120 + (int)(dy / d * 60);
         ln.p2.x = x - (int)(dx / d * 26);
         ln.p2.y = y - (int)(dy / d * 26);
         lv_draw_line(layer, &ln);
@@ -1035,7 +1149,7 @@ static void lc_draw(lv_event_t *e)
         int x, y, on = i == lc_focus;
         lc_pos(i, &x, &y);
         lv_color_t c = on ? lc_apps[i].col : lv_color_hex(0x38425A);
-        hex_stroke(layer, x, y, on ? 21 : 17, c, on ? 2 : 1);
+        hex_stroke(layer, x, y, on ? 19 : 16, c, on ? 2 : 1);
         draw_glyph(layer, lc_apps[i].glyph, x, y - 2, 7,
                    on ? lc_apps[i].col : lv_color_hex(0x5A6478));
         draw_txt_c(layer, &kenney9,
@@ -1044,11 +1158,11 @@ static void lc_draw(lv_event_t *e)
     }
     /* hub: the focused app, big, double-stroked */
     lv_color_t fc = lc_apps[lc_focus].col;
-    hex_stroke(layer, 120, 118, 46, fc, 2);
-    hex_stroke(layer, 120, 118, 41,
+    hex_stroke(layer, 120, 118, 58, fc, 2);
+    hex_stroke(layer, 120, 118, 52,
                lv_color_mix(fc, lv_color_black(), 170), 1);
-    draw_glyph(layer, lc_apps[lc_focus].glyph, 120, 106, 15, fc);
-    draw_txt_c(layer, &kenney16, fc, 120, 128, lc_apps[lc_focus].name);
+    draw_glyph(layer, lc_apps[lc_focus].glyph, 120, 102, 17, fc);
+    draw_txt_c(layer, &kenney16, fc, 120, 130, lc_apps[lc_focus].name);
     draw_txt_c(layer, &kenney9, lv_color_hex(0x38425A), 120, 226, "DRAG TO SELECT - TAP TO OPEN");
 }
 
@@ -1081,7 +1195,7 @@ static void lc_event(lv_event_t *e)
         if (lc_drag_dist >= 10)
             return;
         int dx = lc_press.x - 120, dy = lc_press.y - 118;
-        if (dx * dx + dy * dy < 48 * 48) {
+        if (dx * dx + dy * dy < 62 * 62) {
             nav_to(lc_apps[lc_focus].scr);   /* hub tap opens focused */
             return;
         }
@@ -1090,9 +1204,9 @@ static void lc_event(lv_event_t *e)
             lc_pos(i, &x, &y);
             dx = lc_press.x - x;
             dy = lc_press.y - y;
-            if (dx * dx + dy * dy < 26 * 26) {
-                lc_focus = i;
-                nav_to(lc_apps[i].scr);      /* node tap opens it */
+            if (dx * dx + dy * dy < 24 * 24) {
+                lc_focus = i;           /* nodes only take focus */
+                lv_obj_invalidate(lc_canvas);
                 return;
             }
         }
@@ -1616,102 +1730,184 @@ static void ppg_draw(lv_event_t *ev)
     }
 }
 
-/* one simulator stat card: sharp-cornered fill, small muted label
-   top-left, coloured value right-aligned */
-static void stat_tap_cb(lv_event_t *e)
+/* one stat at a time in the hub, a hex strip picks which — drag or tap
+   a hex to change focus, tap the hub for the deep screen */
+static const struct { const char *name; int glyph; lv_color_t col;
+                      int to; } st_def[] = {
+    {"STEPS",  G_STEPS,  LV_COLOR_MAKE(0x46,0xD8,0xE0), -1},
+    {"HEART",  G_CARDIO, LV_COLOR_MAKE(0xF0,0x58,0x6E), SCR_CARDIO},
+    {"REST",   G_DIAG,   LV_COLOR_MAKE(0xF0,0x8C,0x3C), SCR_CARDIO},
+    {"ENERGY", G_BOLT,   LV_COLOR_MAKE(0xF0,0xD0,0x40), -1},
+    {"SLEEP",  G_SLEEP,  LV_COLOR_MAKE(0xB0,0x6C,0xF0), SCR_SLEEP},
+    {"WATER",  G_WATER,  LV_COLOR_MAKE(0x40,0xB0,0xF0), SCR_WATER},
+};
+#define ST_N ((int)(sizeof st_def / sizeof st_def[0]))
+static int st_focus;
+static lv_obj_t *st_canvas;
+static lv_point_t st_press;
+static int st_dx, st_drag;
+
+static void st_value(int i, char *v, char *u)
 {
-    int to = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
-    if (to >= 0)
-        nav_to((scr_t)to);
+    int steps = ui_steps();
+    int bpm = sensors_bpm();
+    switch (i) {
+    case 0:
+        lv_snprintf(v, 16, "%d", steps > 0 ? steps : 0);
+        lv_snprintf(u, 12, "TODAY");
+        break;
+    case 1:
+        lv_snprintf(v, 16, "%s", bpm > 0 ? "" : "--");
+        if (bpm > 0)
+            lv_snprintf(v, 16, "%d", bpm);
+        lv_snprintf(u, 12, "%s", bpm > 0 ? "BPM" : "NO SIGNAL");
+        break;
+    case 2:
+        lv_snprintf(v, 16, "%s", resting_bpm ? "" : "--");
+        if (resting_bpm)
+            lv_snprintf(v, 16, "%d", resting_bpm);
+        lv_snprintf(u, 12, "%s", resting_bpm ? "BPM" : "LEARNING");
+        break;
+    case 3:
+        lv_snprintf(v, 16, "%d", steps > 0 ? steps * 4 / 100 : 0);
+        lv_snprintf(u, 12, "KCAL");
+        break;
+    case 4:
+        if (s_in_bed) {
+            lv_snprintf(v, 16, "IN BED");
+            u[0] = 0;
+        } else if (s_last_ms) {
+            unsigned sm = s_last_ms / 60000;
+            lv_snprintf(v, 16, "%uH%uM", sm / 60, sm % 60);
+            lv_snprintf(u, 12, "LAST NIGHT");
+        } else {
+            lv_snprintf(v, 16, "--");
+            lv_snprintf(u, 12, "NO DATA");
+        }
+        break;
+    case 5:
+        lv_snprintf(v, 16, "%d", water_ml);
+        lv_snprintf(u, 12, "ML TODAY");
+        break;
+    }
 }
 
-static void stat_card(lv_obj_t *r, int x, int y, const char *lab,
-                      const char *val, lv_color_t vc, int icon, int to)
+static void st_pos(int i, int *x, int *y)
 {
-    lv_obj_t *c = lv_obj_create(r);
-    lv_obj_set_user_data(c, (void *)(intptr_t)to);
-    if (to >= 0)
-        lv_obj_add_event_cb(c, stat_tap_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_set_pos(c, x, y);
-    lv_obj_set_size(c, 96, 44);
-    /* outlined card on near-black — the concept's chamfered look */
-    lv_obj_set_style_bg_color(c, lv_color_hex(0x0B0E14), 0);
-    lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(c, 0, 0);
-    lv_obj_set_style_border_width(c, 1, 0);
-    lv_obj_set_style_border_color(c, vc, 0);
-    lv_obj_set_style_border_opa(c, LV_OPA_50, 0);
-    lv_obj_set_style_pad_all(c, 0, 0);
-    lv_obj_remove_flag(c, LV_OBJ_FLAG_SCROLLABLE);
-    if (to < 0)
-        lv_obj_remove_flag(c, LV_OBJ_FLAG_CLICKABLE);
-    if (icon >= 0)
-        mk_icon_at(c, icon, 0, 6, 10);
-    mk_label(c, &kenney9, C_MUTED, icon >= 0 ? 34 : 8, 7, lab);
-    mk_label(c, &kenney16, vc, icon >= 0 ? 34 : 8, 20, val);
+    *x = 33 + i * 35;
+    *y = 196;
+}
+
+static void st_draw(lv_event_t *e)
+{
+    lv_layer_t *layer = lv_event_get_layer(e);
+    for (int i = 0; i < ST_N; i++) {
+        int x, y, foc = i == st_focus;
+        st_pos(i, &x, &y);
+        hex_stroke(layer, x, y, foc ? 18 : 14,
+                   foc ? st_def[i].col : lv_color_hex(0x38425A),
+                   foc ? 2 : 1);
+        draw_glyph(layer, st_def[i].glyph, x, y, 6,
+                   foc ? st_def[i].col : lv_color_hex(0x5A6478));
+    }
+    lv_color_t fc = st_def[st_focus].col;
+    hex_stroke(layer, 120, 106, 54, fc, 2);
+    hex_stroke(layer, 120, 106, 49,
+               lv_color_mix(fc, lv_color_black(), 170), 1);
+    draw_glyph(layer, st_def[st_focus].glyph, 120, 82, 11, fc);
+    char v[16], u[12];
+    st_value(st_focus, v, u);
+    draw_txt_c(layer, &kenney24, fc, 120, 96, v);
+    draw_txt_c(layer, &kenney9, lv_color_hex(0x8A94A8), 120, 124,
+               st_def[st_focus].name);
+    draw_txt_c(layer, &kenney9, lv_color_mix(fc, lv_color_black(), 140),
+               120, 136, u);
+    /* workout status strip — tap opens the workout app */
+    lv_draw_rect_dsc_t bo;
+    lv_draw_rect_dsc_init(&bo);
+    bo.border_width = 1;
+    bo.border_color = lv_color_hex(0x38425A);
+    bo.border_opa = LV_OPA_COVER;
+    bo.bg_opa = LV_OPA_TRANSP;
+    lv_area_t wb = {22, 218, 218, 232};
+    lv_draw_rect(layer, &bo, &wb);
+    char ws[28];
+    if (w_active)
+        lv_snprintf(ws, sizeof ws, "WORKOUT LIVE - %d SETS", w_sets);
+    else if (w_last_ms)
+        lv_snprintf(ws, sizeof ws, "LAST WORKOUT - %uM %d SETS",
+                    (unsigned)(w_last_ms / 60000u), w_last_sets);
+    else
+        lv_snprintf(ws, sizeof ws, "WORKOUT - NONE YET");
+    draw_txt_c(layer, &kenney9,
+               w_active ? C_WARN : lv_color_hex(0x5A6478), 120, 221, ws);
+}
+
+static void st_event(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_indev_t *in = lv_indev_active();
+    if (code == LV_EVENT_PRESSED) {
+        st_dx = st_drag = 0;
+        if (in)
+            lv_indev_get_point(in, &st_press);
+    } else if (code == LV_EVENT_PRESSING && in) {
+        lv_point_t v;
+        lv_indev_get_vect(in, &v);
+        st_dx += v.x;
+        st_drag += (v.x < 0 ? -v.x : v.x) + (v.y < 0 ? -v.y : v.y);
+        while (st_dx > 30) {
+            st_dx -= 30;
+            st_focus = (st_focus + 1) % ST_N;
+            lv_obj_invalidate(st_canvas);
+        }
+        while (st_dx < -30) {
+            st_dx += 30;
+            st_focus = (st_focus + ST_N - 1) % ST_N;
+            lv_obj_invalidate(st_canvas);
+        }
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        st_dx = 0;
+        if (st_drag >= 10)
+            return;
+        if (st_press.y >= 214 && st_press.y <= 236) {
+            nav_to(SCR_WORKOUT);       /* footer strip */
+            return;
+        }
+        int dx = st_press.x - 120, dy = st_press.y - 106;
+        if (dx * dx + dy * dy < 58 * 58) {
+            if (st_def[st_focus].to >= 0)
+                nav_to((scr_t)st_def[st_focus].to);
+            return;
+        }
+        for (int i = 0; i < ST_N; i++) {
+            int x, y;
+            st_pos(i, &x, &y);
+            dx = st_press.x - x;
+            dy = st_press.y - y;
+            if (dx * dx + dy * dy < 20 * 20) {
+                st_focus = i;
+                lv_obj_invalidate(st_canvas);
+                return;
+            }
+        }
+    }
 }
 
 static void build_stats(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "STATS", 0);
-    char buf[24];
-    int steps = ui_steps();
-    int bpm = sensors_bpm();
-
-    lv_snprintf(buf, sizeof buf, "%d", steps >= 0 ? steps : 0);
-    stat_card(r, 18, 40, "STEPS", steps >= 0 ? buf : "--", C_WHITE, 14, -1);
-    lv_snprintf(buf, sizeof buf, "%d BPM", bpm > 0 ? bpm : 0);
-    stat_card(r, 126, 40, "HEART",
-              bpm > 0 ? buf : (bpm == 0 ? "SENS" : "--"), C_ACCENT, -1,
-              SCR_CARDIO);
-
-    lv_snprintf(buf, sizeof buf, "%d", resting_bpm);
-    stat_card(r, 18, 90, "RESTING", resting_bpm ? buf : "--",
-              C_WHITE, -1, SCR_CARDIO);
-    /* energy: a simple step-based estimate, like the simulator card */
-    lv_snprintf(buf, sizeof buf, "%d KCAL",
-                steps >= 0 ? steps * 4 / 100 : 0);
-    stat_card(r, 126, 90, "ENERGY", buf, C_WARN, -1, -1);
-
-    if (s_in_bed) {
-        lv_snprintf(buf, sizeof buf, "IN BED");
-    } else if (s_last_ms) {
-        unsigned sm = s_last_ms / 60000;
-        lv_snprintf(buf, sizeof buf, "%uH %uM", sm / 60, sm % 60);
-    } else {
-        lv_snprintf(buf, sizeof buf, "--");
-    }
-    stat_card(r, 18, 140, "SLEEP", buf, C_WHITE, -1, SCR_SLEEP);
-    lv_snprintf(buf, sizeof buf, "%d ML", water_ml);
-    stat_card(r, 126, 140, "WATER", buf, lv_color_hex(0x1E96BE), 5,
-              SCR_WATER);
-
-    /* workout status strip — outlined like the stat cards */
-    lv_obj_t *bar = lv_obj_create(r);
-    lv_obj_set_pos(bar, 18, 196);
-    lv_obj_set_size(bar, 204, 26);
-    lv_obj_set_style_bg_color(bar, lv_color_hex(0x0B0E14), 0);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(bar, 0, 0);
-    lv_obj_set_style_border_width(bar, 1, 0);
-    lv_obj_set_style_border_color(bar, C_EDGE, 0);
-    lv_obj_set_style_pad_all(bar, 0, 0);
-    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_user_data(bar, (void *)(intptr_t)SCR_WORKOUT);
-    lv_obj_add_event_cb(bar, stat_tap_cb, LV_EVENT_CLICKED, NULL);
-    mk_label(bar, &kenney9, C_MUTED, 8, 9,
-             w_active ? "WORKOUT LIVE" : "LAST WORKOUT");
-    if (w_active) {
-        lv_snprintf(buf, sizeof buf, "%d SETS", w_sets);
-        mk_label(bar, &kenney9, C_ACCENT, 140, 9, buf);
-    } else if (w_last_ms) {
-        lv_snprintf(buf, sizeof buf, "%uM  %d SETS",
-                    (unsigned)(w_last_ms / 60000u), w_last_sets);
-        mk_label(bar, &kenney9, C_ACCENT, 120, 9, buf);
-    } else {
-        mk_label(bar, &kenney9, C_MUTED, 160, 9, "NONE");
-    }
+    st_canvas = lv_obj_create(r);
+    lv_obj_set_pos(st_canvas, 0, 0);
+    lv_obj_set_size(st_canvas, 240, 240);
+    lv_obj_set_style_bg_opa(st_canvas, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(st_canvas, 0, 0);
+    lv_obj_set_style_pad_all(st_canvas, 0, 0);
+    lv_obj_remove_flag(st_canvas, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(st_canvas, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(st_canvas, st_draw, LV_EVENT_DRAW_MAIN, NULL);
+    lv_obj_add_event_cb(st_canvas, st_event, LV_EVENT_ALL, NULL);
 }
 
 /* ---- notifications + cardio ------------------------------------------------ */
@@ -2221,6 +2417,18 @@ void ui_tick(void)
     case SCR_LAUNCHER:
         lc_tick();
         break;
+    case SCR_CC:
+    case SCR_STATS: {
+        /* wheel content is live: batt %, bt state, bpm, steps */
+        static uint32_t last_wh;
+        if (now - last_wh >= 500) {
+            last_wh = now;
+            lv_obj_t *cv = cur == SCR_CC ? ccw_canvas : st_canvas;
+            if (cv)
+                lv_obj_invalidate(cv);
+        }
+        break;
+    }
     case SCR_DIAG: {
         static uint32_t last_d;
         if (now - last_d >= 500) {

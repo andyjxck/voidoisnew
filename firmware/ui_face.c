@@ -240,7 +240,7 @@ static void build_digital(lv_obj_t *scr)
     lv_obj_add_event_cb(art, digi_draw, LV_EVENT_DRAW_MAIN, NULL);
 
     d_lbl_date = label(scr, &kenney16, 0xD8E0EC, 40, 42, 160, "FRI, OCT 24");
-    d_lbl_time = label(scr, &kenney56, 0xFFFFFF, 30, 74, 180, "10:09");
+    d_lbl_time = label(scr, &kenney56, 0xFFFFFF, 0, 74, 240, "10:09");
 
     /* badges: footprint + steps (cyan), heart + bpm (pink) */
     static lv_image_dsc_t fp_dsc;
