@@ -1049,7 +1049,7 @@ static void lc_draw(lv_event_t *e)
                lv_color_mix(fc, lv_color_black(), 170), 1);
     draw_glyph(layer, lc_apps[lc_focus].glyph, 120, 106, 15, fc);
     draw_txt_c(layer, &kenney16, fc, 120, 128, lc_apps[lc_focus].name);
-    draw_txt_c(layer, &kenney9, lv_color_hex(0x38425A), 120, 226, "SWIPE TO SELECT · TAP TO OPEN");
+    draw_txt_c(layer, &kenney9, lv_color_hex(0x38425A), 120, 226, "DRAG TO SELECT - TAP TO OPEN");
 }
 
 static void lc_event(lv_event_t *e)

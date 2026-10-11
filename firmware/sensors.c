@@ -141,10 +141,12 @@ static void bma_sample(uint32_t now)
     static int wh_decim;
     if (++wh_decim >= 5) {
         wh_decim = 0;
+        /* advance THEN write: wh_idx always points at the newest
+           sample, matching the reference circular-buffer indexing */
+        wh_idx = (wh_idx + 1) & (WH_N - 1);
         whx[wh_idx] = x;               /* RAW axes: their frame */
         why[wh_idx] = y;
         whz[wh_idx] = z;
-        wh_idx = (wh_idx + 1) & (WH_N - 1);
         if (wh_n < WH_N)
             wh_n++;
     }
