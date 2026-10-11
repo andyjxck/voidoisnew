@@ -17,6 +17,7 @@ extern void nimble_stage(int);
 extern void nimble_fault(int);
 
 int boot_last_stage, boot_last_fault;
+extern void hal_boot_confirm(void);
 
 int main(void)
 {
@@ -42,6 +43,13 @@ int main(void)
             hal_delay_ms(20);     /* dark: nothing to draw, idle slower */
         wdt_kick();
         ble_poll();
+        /* 3 s of survived main-loop = sane boot: permanently confirm the
+           DFU'd image or the next reset reverts to the old firmware */
+        static int img_confirmed;
+        if (!img_confirmed && hal_millis() >= 3000) {
+            hal_boot_confirm();
+            img_confirmed = 1;
+        }
         if (button_held_ms() >= 3000)
             SCB_AIRCR = 0x05FA0004;      /* reset -> revert to InfiniTime */
         hal_delay_ms(5);

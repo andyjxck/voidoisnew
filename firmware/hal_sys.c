@@ -677,4 +677,24 @@ uint32_t button_held_ms(void)
     return btn ? now - btn_down_ms : 0;
 }
 
+/* MCUBoot image_ok flag: the DFU'd image is test-booted once and reverts
+   on the next reset unless the app marks itself confirmed. PineTime app
+   slot ends at 0x7C000; the 16-byte boot magic is last, image_ok is the
+   byte 8 before it (0x7BFE8 — the address InfiniTime's validator uses). */
+#define IMAGE_OK_WORD (*(volatile uint32_t *)0x0007BFE8u)
+
+int hal_boot_confirmed(void) { return IMAGE_OK_WORD == 1u; }
+
+void hal_boot_confirm(void)
+{
+    volatile uint32_t *nvmc_ready  = (volatile uint32_t *)0x4001E400u;
+    volatile uint32_t *nvmc_config = (volatile uint32_t *)0x4001E504u;
+    if (IMAGE_OK_WORD == 1u)
+        return;
+    *nvmc_config = 1u;                 /* NVMC write-enable */
+    IMAGE_OK_WORD = 1u;
+    while (!(*nvmc_ready & 1u)) { }
+    *nvmc_config = 0u;
+}
+
 int hal_poll_event(hal_event_t *ev) { (void)ev; return 0; }

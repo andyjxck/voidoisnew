@@ -2006,7 +2006,7 @@ int sensors_hrs_raw(void), sensors_hrs_ac(void), sensors_hrs_fs10(void);
 int sensors_hrs_snr10(void), sensors_hrs_windows(void), sensors_retries(void);
 int sensors_bma_engine(void), sensors_bma_dbg(void), sensors_hrs_pk(void);
 int hal_battery_raw(void);
-int hal_clock_synced(void);
+int hal_clock_synced(void), hal_boot_confirmed(void);
 int ancs_cts_state(void), ancs_sub_fail(void), sensors_hrs_als(void);
 void ble_link_diag(int *conns, int *sec_rc, int *enc_status,
                    int *disc_reason, int *encrypted);
@@ -2034,7 +2034,7 @@ static void diag_fill(void)
         "BLE st%d conn%d enc%d\n"
         " sec%d encst%d disc%d\n"
         " ancs%d sub%d cts%d time%d\n"
-        "LOOP %d/s bat%d%% r%d",
+        "LOOP %d/s bat%d%% r%d fw%d",
         sensors_hrs_ok(), sensors_hrs_raw(), sensors_hrs_als(), sensors_hrs_ac(),
         sensors_hrs_snr10() / 10, sensors_hrs_snr10() % 10,
         sensors_hrs_fs10() / 10, sensors_hrs_fs10() % 10,
@@ -2045,7 +2045,8 @@ static void diag_fill(void)
         sensors_retries(),
         ble_status(), conns, encd, sec, enc, disc,
         ancs_state(), ancs_sub_fail(), ancs_cts_state(), hal_clock_synced(),
-        (int)diag_lps, hal_battery_pct(), hal_battery_raw());
+        (int)diag_lps, hal_battery_pct(), hal_battery_raw(),
+        hal_boot_confirmed());
     if (diag_lbl)
         lv_label_set_text(diag_lbl, b);
 }
