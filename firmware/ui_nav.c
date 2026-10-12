@@ -268,6 +268,18 @@ static lv_obj_t *mk_label_c(lv_obj_t *parent, const lv_font_t *font,
     return l;
 }
 
+static uint32_t last_swipe_ms;
+
+/* CLICKED filter: LVGL fires CLICKED on release even after a long
+   drag (nothing here scrolls), so the tail of every hardware swipe
+   that began on a button was also clicking it — phantom toggles and
+   navigation everywhere. Stop processing when a swipe just fired. */
+static void tap_filter(lv_event_t *e)
+{
+    if (hal_millis() - last_swipe_ms < 400)
+        lv_event_stop_processing(e);
+}
+
 static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt,
                         int x, int y, int w, int h, lv_color_t fill,
                         lv_event_cb_t cb)
@@ -283,11 +295,12 @@ static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt,
     lv_obj_set_style_border_color(b, C_EDGE, 0);
     lv_obj_set_style_shadow_width(b, 0, 0);
     lv_obj_set_style_pad_all(b, 0, 0);
-    /* press feedback: shrink ~6% while held — reads as a physical
-       press on every real button (canvas-drawn tiles can't scale;
-       they have the haptic tick instead) */
-    lv_obj_set_style_transform_scale_x(b, 240, LV_STATE_PRESSED);
-    lv_obj_set_style_transform_scale_y(b, 240, LV_STATE_PRESSED);
+    /* LVGL fires CLICKED on release even after a long drag (nothing
+       here scrolls), so the tail of every hardware swipe that began
+       on a button was also clicking it — phantom toggles/navigation
+       everywhere ("dragging is buggy"). Attached BEFORE the real cb
+       so stop_processing swallows the click. */
+    lv_obj_add_event_cb(b, tap_filter, LV_EVENT_CLICKED, NULL);
     if (cb)
         lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *l = lv_label_create(b);
@@ -356,41 +369,10 @@ static int nav_sp;
 static void notif_reset_view(void);
 static uint32_t notif_sel_uid;
 
-/* ---- screen transitions ------------------------------------------------
-   Swipe direction decides which edge the new content enters from;
-   taps get a short fade. root itself slides/fades — no per-screen
-   objects, ~180 ms, so nothing re-introduces the old flashes. */
-static int pend_dir;   /* cst_dir behind the next nav_to; 0 = tap/back */
-
-static void nav_fade_exec(void *o, int32_t v)
-{
-    lv_obj_set_style_opa(o, (lv_opa_t)v, 0);
-}
-
-static void play_nav_anim(void)
-{
-    int d = pend_dir;
-    pend_dir = 0;
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, root);
-    lv_anim_set_duration(&a, 180);
-    if (d == 3 || d == 4) {              /* horizontal swipes */
-        int x0 = d == 3 ? 28 : -28;      /* enter from swipe's origin */
-        lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_x);
-        lv_anim_set_values(&a, x0, 0);
-    } else if (d) {                      /* vertical swipes */
-        int y0 = d == 1 ? -28 : 28;
-        lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_y);
-        lv_anim_set_values(&a, y0, 0);
-    } else {                             /* taps: soft fade-in */
-        lv_anim_set_duration(&a, 140);
-        lv_anim_set_exec_cb(&a, nav_fade_exec);
-        lv_anim_set_values(&a, 0, LV_OPA_COVER);
-    }
-    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
-    lv_anim_start(&a);
-}
+/* Screen transitions were removed (1.6.2): full-screen software-rendered
+   slides ran at ~4 fps and made every navigation feel like molasses.
+   Instant switches are faster than this chip can animate. */
+static int pend_dir;   /* kept for dir_nav bookkeeping; no animation */
 
 static void nav_to(scr_t s)
 {
@@ -410,7 +392,6 @@ static void nav_to(scr_t s)
     back_target = nav_sp ? nav_stack[nav_sp - 1] : SCR_FACE;
     cur = s;
     rebuild();
-    play_nav_anim();
 }
 
 static void nav_back(void)
@@ -422,7 +403,6 @@ static void nav_back(void)
         back_target = nav_sp ? nav_stack[nav_sp - 1] : SCR_FACE;
         cur = to;
         rebuild();
-        play_nav_anim();
     } else {
         nav_to(SCR_FACE);
     }
@@ -485,8 +465,6 @@ static void dir_nav(int cst_dir, int start_x)
             nav_back();
     }
 }
-
-static uint32_t last_swipe_ms;
 
 int ui_swipe(int cst_dir, int start_x)
 {
@@ -747,13 +725,13 @@ static void ccw_event(lv_event_t *e)
         lv_indev_get_vect(in, &v);
         ccw_dx += v.x;
         ccw_drag += (v.x < 0 ? -v.x : v.x) + (v.y < 0 ? -v.y : v.y);
-        while (ccw_dx > 30) {
-            ccw_dx -= 30;
+        while (ccw_dx > 46) {
+            ccw_dx -= 46;
             ccw_focus = (ccw_focus + 1) % ccw_n;
             lv_obj_invalidate(ccw_canvas);
         }
-        while (ccw_dx < -30) {
-            ccw_dx += 30;
+        while (ccw_dx < -46) {
+            ccw_dx += 46;
             ccw_focus = (ccw_focus + ccw_n - 1) % ccw_n;
             lv_obj_invalidate(ccw_canvas);
         }
@@ -1250,13 +1228,13 @@ static void lc_event(lv_event_t *e)
         lv_indev_get_vect(in, &v);
         lc_dx += v.x;
         lc_drag_dist += (v.x < 0 ? -v.x : v.x) + (v.y < 0 ? -v.y : v.y);
-        while (lc_dx > 34) {
-            lc_dx -= 34;
+        while (lc_dx > 46) {
+            lc_dx -= 46;
             lc_focus = (lc_focus + 1) % LC_N;
             lv_obj_invalidate(lc_canvas);
         }
-        while (lc_dx < -34) {
-            lc_dx += 34;
+        while (lc_dx < -46) {
+            lc_dx += 46;
             lc_focus = (lc_focus + LC_N - 1) % LC_N;
             lv_obj_invalidate(lc_canvas);
         }
@@ -1929,13 +1907,13 @@ static void st_event(lv_event_t *e)
         lv_indev_get_vect(in, &v);
         st_dx += v.x;
         st_drag += (v.x < 0 ? -v.x : v.x) + (v.y < 0 ? -v.y : v.y);
-        while (st_dx > 30) {
-            st_dx -= 30;
+        while (st_dx > 42) {
+            st_dx -= 42;
             st_focus = (st_focus + 1) % ST_N;
             lv_obj_invalidate(st_canvas);
         }
-        while (st_dx < -30) {
-            st_dx += 30;
+        while (st_dx < -42) {
+            st_dx += 42;
             st_focus = (st_focus + ST_N - 1) % ST_N;
             lv_obj_invalidate(st_canvas);
         }
@@ -2497,9 +2475,11 @@ void ui_tick(void)
         break;
     case SCR_CC:
     case SCR_STATS: {
-        /* wheel content is live: batt %, bt state, bpm, steps */
+        /* wheel content is live: batt %, bt state, bpm, steps. A
+           full-canvas invalidate repaints every hex + glyph — at
+           500 ms it was eating half the frame budget for nothing */
         static uint32_t last_wh;
-        if (now - last_wh >= 500) {
+        if (now - last_wh >= 1000) {
             last_wh = now;
             lv_obj_t *cv = cur == SCR_CC ? ccw_canvas : st_canvas;
             if (cv)

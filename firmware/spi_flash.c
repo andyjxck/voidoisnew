@@ -64,10 +64,13 @@ static uint8_t flash_status(void)
 
 static void flash_wait(void)
 {
-    /* WIP bit; kick the watchdog — sector erase can take tens of ms */
+    /* WIP bit; kick the watchdog — sector erase can take tens of ms.
+       Bounded: a wedged flash must not freeze the watch forever */
     for (unsigned i = 0; flash_status() & 1; i++) {
         if ((i & 0x3FF) == 0)
             wdt_kick();
+        if (i > 200000)
+            break;                  /* ~2 s worst case: give up */
     }
 }
 

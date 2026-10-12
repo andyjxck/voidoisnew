@@ -586,6 +586,9 @@ void sensors_tick(uint32_t now)
         last_hrs = raw;
         hrs_sample(raw);
     }
+    /* power writes live here, not in sensors_hr_set: a blocking i2c
+       transaction from inside an LVGL tap handler was the "crashed
+       when I toggled heart rate" path — it ran mid-event-dispatch */
     if (hrs_ok && !hr_on && hrs_powered) {
         hrs_power(0);                   /* manual off: LED dark for good */
         hrs_powered = 0;
@@ -593,19 +596,21 @@ void sensors_tick(uint32_t now)
         bpm = 0;
         daq_n = 0;
         spec_reset = 1;
+    } else if (hrs_ok && hr_on && !hrs_powered) {
+        hrs_power(1);
+        hrs_powered = 1;
+        daq_n = 0;
+        spec_reset = 1;
+        dc = ac_f = 0;
     }
 }
 
 void sensors_hr_set(int on)
 {
-    hr_on = on ? 1 : 0;
-    if (hr_on && hrs_ok) {
-        daq_n = 0;
-        spec_reset = 1;
-        dc = ac_f = 0;
-        hrs_power(1);
-        hrs_powered = 1;
-    }
+    hr_on = on ? 1 : 0;    /* tick does the actual power write */
+    daq_n = 0;
+    spec_reset = 1;
+    dc = ac_f = 0;
 }
 int sensors_hr_on(void) { return hr_on; }
 
