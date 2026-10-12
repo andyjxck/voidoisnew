@@ -104,12 +104,13 @@ void sensors_hr_set(int);
 int hal_battery_pct(void);
 void hal_motor(int);
 
-/* short confirmation buzz for taps/selections — keeps the motor code
-   in one place so every tap feels the same */
+/* haptic tick helper — intentionally a no-op. The 1.6 haptics made
+   the motor run continuously on-device; root cause under
+   investigation, so all call sites stay but do nothing until the
+   behaviour is verified. */
 static void buzz(int ms)
 {
-    hal_motor(1);
-    motor_off_at = hal_millis() + ms;
+    (void)ms;
 }
 
 #define PERSIST_ADDR 0x3F0000u   /* top sector, clear of the DFU region */
@@ -522,15 +523,6 @@ void ui_wake(void)
         display_sleep(0);
         touch_sleep(0);
         lv_obj_invalidate(lv_screen_active());  /* panel RAM is stale */
-        lv_timer_handler();       /* draw a fresh frame in the dark */
-        /* stepped fade-in instead of the backlight snapping on —
-           L/M/H give 4 brightness steps */
-        display_backlight(1);
-        hal_delay_ms(50);
-        if (bl_level() >= 2) {
-            display_backlight(2);
-            hal_delay_ms(50);
-        }
         display_backlight(bl_level());
     }
     last_input_ms = hal_millis();
