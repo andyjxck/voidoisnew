@@ -94,18 +94,11 @@ int nimble_last_fault(void)
     return v >= 0xF0 ? (int)(v & 0xF) : 0;
 }
 
-/* Pulses the backlight `stage` times so we can see how far NimBLE init
-   gets on hardware with no debugger. Temporary diagnostic. */
+/* Records boot progress for the diag paths. The old version also
+   pulsed the backlight `stage` times as a bring-up signal — that is
+   the flashing the user sees at every boot, so it is gone for good.
+   Keep the stage record: it powers boot_last_stage diagnostics. */
 void nimble_mark(int stage)
 {
     nimble_stage(stage);
-    GPIO_DIRSET = BIT(PIN_BL_H);
-    for (int i = 0; i < stage; i++) {
-        wdt_kick();
-        GPIO_OUTCLR = BIT(PIN_BL_H);   /* backlight on (active low) */
-        hal_delay_ms(70);
-        GPIO_OUTSET = BIT(PIN_BL_H);
-        hal_delay_ms(130);
-    }
-    hal_delay_ms(350);
 }

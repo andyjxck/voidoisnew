@@ -11,6 +11,7 @@ void display_backlight(int level);
 void display_sleep(int on);
 void touch_sleep(int on);
 void ui_face_build(lv_obj_t *root);
+void ui_face_breath_stop(void);
 void ui_face_tick(void);
 void sensors_tick(uint32_t now);
 int sensors_bma_ok(void);
@@ -98,8 +99,18 @@ int sensors_steps(void);
 int sensors_wrist_raise(void);
 int sensors_raise_wake(void);
 int sensors_ppg(int i, int *out_y100);
+int sensors_hr_on(void);
+void sensors_hr_set(int);
 int hal_battery_pct(void);
 void hal_motor(int);
+
+/* short confirmation buzz for taps/selections — keeps the motor code
+   in one place so every tap feels the same */
+static void buzz(int ms)
+{
+    hal_motor(1);
+    motor_off_at = hal_millis() + ms;
+}
 
 #define PERSIST_ADDR 0x3F0000u   /* top sector, clear of the DFU region */
 struct persist {
@@ -118,6 +129,7 @@ struct persist {
     uint16_t clock_year;
     uint8_t clock_mon, clock_day, clock_dow, clock_ok;
     uint8_t face_dig;
+    uint8_t hr_on;
 };
 static struct persist P;
 
@@ -147,7 +159,7 @@ static void persist_save(void)
 {
     persist_dirty = 0;
     P.magic = 0x564F4944u;
-    P.ver = 3;
+    P.ver = 4;
     P.brightness = (uint8_t)brightness;
     P.dnd = (uint8_t)dnd_on;
     P.airplane = (uint8_t)airplane_on;
@@ -163,6 +175,7 @@ static void persist_save(void)
     P.last_workout_sets = (uint8_t)w_last_sets;
     P.s_track = (uint8_t)s_track;
     P.face_dig = (uint8_t)face_dig;
+    P.hr_on = (uint8_t)sensors_hr_on();
     if (sensors_steps() >= 0) {      /* a dead BMA must not poison totals */
         P.steps_total = (uint32_t)ui_steps();
         P.chip_at_save = (uint32_t)sensors_steps();
@@ -186,7 +199,9 @@ static void persist_load(void)
 {
     spi_flash_init();
     spi_flash_read(PERSIST_ADDR, (uint8_t *)&P, sizeof P);
-    if (P.magic != 0x564F4944u || P.ver != 3) {
+    /* ver 3 loads fine too: same layout minus hr_on — the extra byte
+       reads as stale/0xFF and the `<= 1` guard below treats it as on */
+    if (P.magic != 0x564F4944u || (P.ver != 3 && P.ver != 4)) {
         memset(&P, 0, sizeof P);
         return;
     }
@@ -208,6 +223,8 @@ static void persist_load(void)
     w_last_sets = P.last_workout_sets;
     s_track = P.s_track;
     face_dig = P.face_dig;
+    if (P.hr_on <= 1)
+        sensors_hr_set(P.hr_on);
     /* restore the saved wall clock when nothing newer has been set
        this boot; the phone will correct it on the next sync */
     if (P.clock_ok && P.clock_year >= 2024 && !hal_clock_synced()) {
@@ -265,6 +282,11 @@ static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt,
     lv_obj_set_style_border_color(b, C_EDGE, 0);
     lv_obj_set_style_shadow_width(b, 0, 0);
     lv_obj_set_style_pad_all(b, 0, 0);
+    /* press feedback: shrink ~6% while held — reads as a physical
+       press on every real button (canvas-drawn tiles can't scale;
+       they have the haptic tick instead) */
+    lv_obj_set_style_transform_scale_x(b, 240, LV_STATE_PRESSED);
+    lv_obj_set_style_transform_scale_y(b, 240, LV_STATE_PRESSED);
     if (cb)
         lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *l = lv_label_create(b);
@@ -333,6 +355,42 @@ static int nav_sp;
 static void notif_reset_view(void);
 static uint32_t notif_sel_uid;
 
+/* ---- screen transitions ------------------------------------------------
+   Swipe direction decides which edge the new content enters from;
+   taps get a short fade. root itself slides/fades — no per-screen
+   objects, ~180 ms, so nothing re-introduces the old flashes. */
+static int pend_dir;   /* cst_dir behind the next nav_to; 0 = tap/back */
+
+static void nav_fade_exec(void *o, int32_t v)
+{
+    lv_obj_set_style_opa(o, (lv_opa_t)v, 0);
+}
+
+static void play_nav_anim(void)
+{
+    int d = pend_dir;
+    pend_dir = 0;
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, root);
+    lv_anim_set_duration(&a, 180);
+    if (d == 3 || d == 4) {              /* horizontal swipes */
+        int x0 = d == 3 ? 28 : -28;      /* enter from swipe's origin */
+        lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_x);
+        lv_anim_set_values(&a, x0, 0);
+    } else if (d) {                      /* vertical swipes */
+        int y0 = d == 1 ? -28 : 28;
+        lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_y);
+        lv_anim_set_values(&a, y0, 0);
+    } else {                             /* taps: soft fade-in */
+        lv_anim_set_duration(&a, 140);
+        lv_anim_set_exec_cb(&a, nav_fade_exec);
+        lv_anim_set_values(&a, 0, LV_OPA_COVER);
+    }
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_start(&a);
+}
+
 static void nav_to(scr_t s)
 {
     if (cur == SCR_NOTIF && s != SCR_NOTIF)
@@ -351,6 +409,7 @@ static void nav_to(scr_t s)
     back_target = nav_sp ? nav_stack[nav_sp - 1] : SCR_FACE;
     cur = s;
     rebuild();
+    play_nav_anim();
 }
 
 static void nav_back(void)
@@ -362,6 +421,7 @@ static void nav_back(void)
         back_target = nav_sp ? nav_stack[nav_sp - 1] : SCR_FACE;
         cur = to;
         rebuild();
+        play_nav_anim();
     } else {
         nav_to(SCR_FACE);
     }
@@ -386,6 +446,7 @@ static void dir_nav(int cst_dir, int start_x)
 {
     if (water_lock)
         return;
+    pend_dir = cst_dir;        /* remembered for the slide direction */
     if (cur == SCR_FACE) {
         if (cst_dir == 1)
             nav_to(start_x < 120 ? SCR_CC : SCR_LAUNCHER);
@@ -396,13 +457,18 @@ static void dir_nav(int cst_dir, int start_x)
         else if (cst_dir == 3)
             nav_to(SCR_CARDIO);
     } else if (cur == SCR_CC || cur == SCR_LAUNCHER) {
-        if (cst_dir == 2)
+        /* up OR down exits — the swipe is hardware-detected and a
+           near-vertical flick often lands on the "wrong" one; both
+           directions mean "back to the face" here */
+        if (cst_dir == 1 || cst_dir == 2)
             nav_to(SCR_FACE);
     } else if (cur == SCR_STATS) {
-        if (cst_dir == 1)
+        if (cst_dir == 1 || cst_dir == 2)
             nav_to(SCR_FACE);
     } else if (cur == SCR_NOTIF) {
-        if (cst_dir == 3) {
+        /* every other screen uses dir 4 (L->R) as back; NOTIF alone
+           answered dir 3 — swipes looked dead on this screen only */
+        if (cst_dir == 3 || cst_dir == 4) {
             if (notif_sel_uid) {
                 notif_reset_view();
                 rebuild();
@@ -424,9 +490,10 @@ static uint32_t last_swipe_ms;
 int ui_swipe(int cst_dir, int start_x)
 {
     last_swipe_ms = hal_millis();
-    /* the honeycomb is dragged with the finger: only its exit swipe
-       (up) is a navigation gesture, everything else stays an LVGL drag */
-    if (cur == SCR_LAUNCHER && cst_dir != 2)
+    /* the honeycomb is dragged with the finger: horizontal hardware
+       gestures are the tail of a focus drag and stay drags; vertical
+       ones mean "back to the face" */
+    if (cur == SCR_LAUNCHER && cst_dir != 1 && cst_dir != 2)
         return 0;
     scr_t before = cur;
     dir_nav(cst_dir, start_x);
@@ -455,6 +522,15 @@ void ui_wake(void)
         display_sleep(0);
         touch_sleep(0);
         lv_obj_invalidate(lv_screen_active());  /* panel RAM is stale */
+        lv_timer_handler();       /* draw a fresh frame in the dark */
+        /* stepped fade-in instead of the backlight snapping on —
+           L/M/H give 4 brightness steps */
+        display_backlight(1);
+        hal_delay_ms(50);
+        if (bl_level() >= 2) {
+            display_backlight(2);
+            hal_delay_ms(50);
+        }
         display_backlight(bl_level());
     }
     last_input_ms = hal_millis();
@@ -588,11 +664,13 @@ static void ccw_activate(int d)
         water_lock ^= 1;
         break;
     case CCW_SET:
+        buzz(35);
         nav_to(SCR_SETTINGS);
         return;
     default:
         return;
     }
+    buzz(20);                       /* toggles get a light tick */
     persist_mark();
     lv_obj_invalidate(ccw_canvas);
 }
@@ -1196,6 +1274,7 @@ static void lc_event(lv_event_t *e)
             return;
         int dx = lc_press.x - 120, dy = lc_press.y - 118;
         if (dx * dx + dy * dy < 62 * 62) {
+            buzz(35);
             nav_to(lc_apps[lc_focus].scr);   /* hub tap opens focused */
             return;
         }
@@ -1206,6 +1285,7 @@ static void lc_event(lv_event_t *e)
             dy = lc_press.y - y;
             if (dx * dx + dy * dy < 24 * 24) {
                 lc_focus = i;           /* nodes only take focus */
+                buzz(20);               /* haptic tick = selection */
                 lv_obj_invalidate(lc_canvas);
                 return;
             }
@@ -1575,16 +1655,16 @@ static void build_settings(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "SETTINGS", 1);
-    static const char *rows[11] = {
+    static const char *rows[12] = {
         "DND", "AIRPLANE", "BLUETOOTH", "TORCH", "WATER LOCK",
         "BRIGHTNESS", "CC: TORCH", "CC: WATER", "CC: PHONE",
-        "SET TIME", "FACE"
+        "SET TIME", "FACE", "HEART RATE"
     };
-    int vals[11] = {dnd_on, airplane_on, bt_on, torch_on, water_lock,
+    int vals[12] = {dnd_on, airplane_on, bt_on, torch_on, water_lock,
                     brightness, !(cc_hide & 1), !(cc_hide & 2),
-                    !(cc_hide & 4), 1, face_dig};
-    for (int i = 0; i < 11; i++) {
-        int y = 40 + i * 16;
+                    !(cc_hide & 4), 1, face_dig, sensors_hr_on()};
+    for (int i = 0; i < 12; i++) {
+        int y = 40 + i * 15;
         mk_label(r, &kenney9, C_WHITE, 18, y, rows[i]);
         char v[8];
         if (i == 5)
@@ -1695,6 +1775,7 @@ static void settings_cb(lv_event_t *e)
         nav_to(SCR_SETTIME);
         return;
     case 10: face_dig ^= 1; break;
+    case 11: sensors_hr_set(!sensors_hr_on()); break;
     }
     rebuild();
     persist_mark();
@@ -1871,13 +1952,16 @@ static void st_event(lv_event_t *e)
         if (st_drag >= 10)
             return;
         if (st_press.y >= 214 && st_press.y <= 236) {
+            buzz(35);
             nav_to(SCR_WORKOUT);       /* footer strip */
             return;
         }
         int dx = st_press.x - 120, dy = st_press.y - 106;
         if (dx * dx + dy * dy < 58 * 58) {
-            if (st_def[st_focus].to >= 0)
+            if (st_def[st_focus].to >= 0) {
+                buzz(35);
                 nav_to((scr_t)st_def[st_focus].to);
+            }
             return;
         }
         for (int i = 0; i < ST_N; i++) {
@@ -1887,6 +1971,7 @@ static void st_event(lv_event_t *e)
             dy = st_press.y - y;
             if (dx * dx + dy * dy < 20 * 20) {
                 st_focus = i;
+                buzz(20);
                 lv_obj_invalidate(st_canvas);
                 return;
             }
@@ -2260,6 +2345,7 @@ static void build_diag(lv_obj_t *r)
 
 static void rebuild(void)
 {
+    ui_face_breath_stop();   /* anim must die before its label does */
     lv_obj_clean(root);
     lbl_time_big = NULL;
     cardio_trace = NULL;

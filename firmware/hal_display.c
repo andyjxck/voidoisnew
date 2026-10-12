@@ -90,6 +90,17 @@ void display_init(void)
     lcd_cmd(0x36); lcd_byte(0x00);     /* MADCTL */
     lcd_cmd(0x21);                     /* INVON */
     lcd_cmd(0x13);                     /* NORON */
+    /* GRAM is random out of reset — clear to black BEFORE DISPON or
+       the first thing on the glass is noise stripes */
+    lcd_cmd(0x2A); lcd_data((uint8_t[]){0, 0, 0, 239}, 4);
+    lcd_cmd(0x2B); lcd_data((uint8_t[]){0, 0, 0, 239}, 4);
+    lcd_cmd(0x2C);
+    GPIO_OUTSET = BIT(PIN_LCD_DC);
+    {
+        static const uint8_t zeros[240] = {0};
+        for (int row = 0; row < 240; row++)
+            spi_tx_raw(zeros, sizeof zeros);
+    }
     lcd_cmd(0x29); hal_delay_ms(20);   /* DISPON */
     lcd_select(0);
 }

@@ -32,6 +32,12 @@ int d_subscribed, d_mtu_events;   /* exposed to the DFU diag char */
 static int d_ll_evs, d_hs_evs;
 int d_ll_cmds, d_hs_evt_tx;   /* patched into ble_ll_hci.c */
 int d_st1, d_st2, d_st2rc = -9, d_startgo, d_resetrc = -9; /* ble_hs startup */
+/* pairing request is deferred ~1.5 s after connect: firing
+   ble_gap_security_initiate() inside the CONNECT event hits phones
+   before their link is ready (the request is silently dropped on
+   several stacks, leaving ANCS/CTS unreachable forever) */
+static uint32_t sec_pending_at;
+static int sec_attempts;
 
 static void ble_advertise(void);
 int ble_connected(void);
@@ -42,6 +48,7 @@ void ancs_on_enc_ok(void);
 void ancs_on_notify(uint16_t attr_handle, struct os_mbuf *om);
 void ancs_tick(void);
 int ble_store_ram_init(void);
+extern uint32_t hal_millis(void);
 
 static int gap_cb(struct ble_gap_event *ev, void *arg)
 {
@@ -54,9 +61,12 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
             /* ANCS discovery kicks off as soon as the link settles */
             ancs_on_connect(conn_handle);
             /* ask the phone to pair/encrypt: ANCS + CTS need it, and
-               iOS only prompts when the accessory requests security */
+               iOS only prompts when the accessory requests security.
+               Deferred a beat — see sec_pending_at. */
             d_conns++;
-            d_sec_rc = ble_gap_security_initiate(conn_handle);
+            d_sec_rc = -1;
+            sec_attempts = 0;
+            sec_pending_at = hal_millis() + 1500;
         } else {
             ble_advertise();
         }
@@ -64,6 +74,7 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         d_disc_reason = ev->disconnect.reason;
         conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        sec_pending_at = 0;
         ancs_on_disconnect();
         ble_advertise();
         break;
@@ -197,6 +208,24 @@ void ble_poll(void)
         nimble_stage(14);
     }
     npl_callout_tick();
+    /* deferred pairing request + bounded retries. The first request
+       races the phone's own post-connect setup on some stacks and is
+       silently dropped — with no retry the link stayed unencrypted
+       and ANCS/CTS never came up ("SYNCING... ANCS HANDSHAKE"). */
+    if (ble_connected()) {
+        struct ble_gap_conn_desc sd;
+        int enc = ble_gap_conn_find(conn_handle, &sd) == 0 &&
+                  sd.sec_state.encrypted;
+        if (!enc && sec_pending_at && hal_millis() >= sec_pending_at) {
+            d_sec_rc = ble_gap_security_initiate(conn_handle);
+            sec_attempts++;
+            sec_pending_at = sec_attempts < 4
+                                 ? hal_millis() + 6000
+                                 : 0;
+        } else if (enc) {
+            sec_pending_at = 0;
+        }
+    }
     ancs_tick();
     /* advertising watchdog: any failed/interrupted adv start (disconnect
        races, failed pairing) would otherwise leave the watch invisible */

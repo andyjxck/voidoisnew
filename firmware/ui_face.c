@@ -24,6 +24,38 @@ static lv_obj_t *lbl_bpm, *lbl_steps, *lbl_date, *heart_obj, *fp_obj;
 static lv_obj_t *d_lbl_time, *d_lbl_date, *d_lbl_steps, *d_lbl_bpm;
 static int is_digital;
 static uint32_t frame_ms;
+
+/* ---- breathing pulse ------------------------------------------------------
+   one tiny opacity anim on the BPM readout: 60% <-> 100% over a ~4 s
+   cycle. Only the label's pixels get dirtied each frame, and
+   lv_timer_handler doesn't run while the panel sleeps, so it costs
+   nothing in the dark. The anim MUST be deleted before the label is
+   (rebuild's lv_obj_clean frees it) — hence ui_face_breath_stop(). */
+static lv_obj_t *breath_obj;
+static void breath_exec(void *o, int32_t v)
+{
+    lv_obj_set_style_opa(o, (lv_opa_t)v, 0);
+}
+static void breath_start(lv_obj_t *o)
+{
+    breath_obj = o;
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, o);
+    lv_anim_set_exec_cb(&a, breath_exec);
+    lv_anim_set_values(&a, LV_OPA_60, LV_OPA_COVER);
+    lv_anim_set_duration(&a, 2000);
+    lv_anim_set_reverse_duration(&a, 2000);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_start(&a);
+}
+void ui_face_breath_stop(void)
+{
+    if (breath_obj) {
+        lv_anim_delete(breath_obj, breath_exec);  /* compares, no deref */
+        breath_obj = NULL;
+    }
+}
 /* label caches live at file scope so ui_face_build can reset them —
    otherwise a rebuilt label keeps its placeholder until the value moves */
 static int last_bpm = -1, last_steps = -1, last_synced = -1, last_dom = -1;
@@ -270,6 +302,7 @@ static void build_digital(lv_obj_t *scr)
     lv_obj_add_event_cb(heart_obj, heart_draw, LV_EVENT_DRAW_MAIN, NULL);
     d_lbl_bpm = label(scr, &kenney24, 0xF0586E, 158, 178, 44, "76");
     label(scr, &kenney9, 0x8A94A8, 182, 196, 40, "BPM");
+    breath_start(d_lbl_bpm);
 
     last_bpm = last_steps = last_synced = last_dom = last_min = -1;
 }
@@ -341,6 +374,7 @@ void ui_face_build(lv_obj_t *scr)
     lv_obj_add_event_cb(heart_obj, heart_draw, LV_EVENT_DRAW_MAIN, NULL);
     lbl_bpm = label(scr, &kenney9, 0xD8E0EC, 114, 173, 46, "--");
     lv_obj_set_style_text_align(lbl_bpm, LV_TEXT_ALIGN_LEFT, 0);
+    breath_start(lbl_bpm);
 }
 
 

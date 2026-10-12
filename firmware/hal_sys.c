@@ -148,6 +148,18 @@ void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s)
     clock_valid = 1;
 }
 
+/* Sakamoto's algorithm: weekday from Y/M/D, returns 1=Mon .. 7=Sun.
+   Only needed because older persisted/synced records never stored
+   dow — the calendar knows it anyway. */
+static int ymd_to_dow(int y, int m, int d)
+{
+    static const uint8_t t[12] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+    if (m < 3)
+        y -= 1;
+    int w = (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7; /* 0=Sun */
+    return ((w + 6) % 7) + 1;                                  /* 1=Mon..7=Sun */
+}
+
 void hal_clock_date(int *y, int *mo, int *d, int *dow)
 {
     /* roll the synced date forward by however many midnights have
@@ -169,6 +181,12 @@ void hal_clock_date(int *y, int *mo, int *d, int *dow)
             }
             ww = ww % 7 + 1;           /* 1=Mon .. 7=Sun */
         }
+    }
+    /* dow was only ever set by BLE time sync — a persisted date has
+       dow=0 forever. Derive it from the calendar instead. */
+    if (ww < 1 || ww > 7) {
+        if (yy >= 2000 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31)
+            ww = ymd_to_dow(yy, mm, dd);
     }
     if (y) *y = yy;
     if (mo) *mo = mm;
@@ -369,9 +387,14 @@ static void twi_recover(void)
    The LCD holds the last frame even through a crash, so the bars that
    appear (or don't) show exactly which step died. */
 void display_send(int x0, int y0, int x1, int y1, const uint16_t *px);
+/* 1 = show the colored boot stripes (boot debug only — the user sees
+   these as random lines/flashes at every boot, so production = 0) */
+static int boot_marks;
 static void imark(int row, uint16_t c)
 {
     static uint16_t line[240];
+    if (!boot_marks)
+        return;
     for (int i = 0; i < 240; i++)
         line[i] = c;
     display_send(0, row * 12, 239, row * 12 + 9, line);
@@ -640,19 +663,19 @@ int hal_init(void)
 {
     /* instruction cache is off out of reset — flash code runs ~2x slower */
     *(volatile uint32_t *)0x4001E540 = 1;   /* NVMC->ICACHECNF */
-    GPIO_DIRSET = BIT(PIN_BL_H);            /* earliest possible sign of life */
-    GPIO_OUTCLR = BIT(PIN_BL_H);            /* backlight on (active low) */
+    /* backlight stays OFF through init: nothing is allowed on-screen
+       until the first face frame renders (no garbage, no stripes) */
+    GPIO_DIRSET = BIT(PIN_BL_L) | BIT(PIN_BL_M) | BIT(PIN_BL_H);
+    GPIO_OUTSET = BIT(PIN_BL_L) | BIT(PIN_BL_M) | BIT(PIN_BL_H);
     time_init();
     button_init();
     nimble_stage(80);
     display_init();
-    display_backlight(3);      /* on early so init stripes are visible */
     twi_init();
     touch_init();
     imark(9, 0x8410);          /* grey:  hal i2c init complete */
     sensors_init();
     nimble_stage(84);
-    display_backlight(3);
     return 1;
 }
 
