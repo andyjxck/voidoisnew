@@ -160,7 +160,7 @@ static void persist_save(void)
 {
     persist_dirty = 0;
     P.magic = 0x564F4944u;
-    P.ver = 4;
+    P.ver = 5;
     P.brightness = (uint8_t)brightness;
     P.dnd = (uint8_t)dnd_on;
     P.airplane = (uint8_t)airplane_on;
@@ -200,9 +200,12 @@ static void persist_load(void)
 {
     spi_flash_init();
     spi_flash_read(PERSIST_ADDR, (uint8_t *)&P, sizeof P);
-    /* ver 3 loads fine too: same layout minus hr_on — the extra byte
-       reads as stale/0xFF and the `<= 1` guard below treats it as on */
-    if (P.magic != 0x564F4944u || (P.ver != 3 && P.ver != 4)) {
+    /* ver 3/4 load fine too: same layout. ver 3 had no hr_on, and that
+       byte was struct padding copied from a zeroed P, so it read back
+       as 0 = "heart rate off". 1.6.x then re-saved it as ver 4 with
+       hr_on = 0, which is why the face showed "--" for good. Only a
+       ver 5 record (written by this build) is trusted for hr_on. */
+    if (P.magic != 0x564F4944u || P.ver < 3 || P.ver > 5) {
         memset(&P, 0, sizeof P);
         return;
     }
@@ -224,8 +227,10 @@ static void persist_load(void)
     w_last_sets = P.last_workout_sets;
     s_track = P.s_track;
     face_dig = P.face_dig;
-    if (P.hr_on <= 1)
+    if (P.ver >= 5 && P.hr_on <= 1)
         sensors_hr_set(P.hr_on);
+    else
+        sensors_hr_set(1);
     /* restore the saved wall clock when nothing newer has been set
        this boot; the phone will correct it on the next sync */
     if (P.clock_ok && P.clock_year >= 2024 && !hal_clock_synced()) {
