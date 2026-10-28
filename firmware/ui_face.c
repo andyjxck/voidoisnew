@@ -4,7 +4,7 @@
 #include "board.h"
 #include "assets.h"
 
-extern const lv_font_t kenney9, kenney16, kenney24, kenney56;
+extern const lv_font_t kenney9, kenney12, kenney16, kenney24, kenney56;
 int sensors_bpm(void);
 int ui_steps(void);
 int sensors_ppg(int i, int *out_y100);

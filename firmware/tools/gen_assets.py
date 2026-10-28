@@ -128,7 +128,7 @@ def main():
 
     with open(LVGL_OUT, "w") as f:
         f.write('#include "lvgl.h"\n#include "src/font/lv_font_fmt_txt.h"\n\n')
-        for px in (9, 16, 24, 56):
+        for px in (9, 12, 16, 24, 56):
             font = ImageFont.truetype(os.path.join(FONTS, "Kenney Future.ttf"), px)
             ascent, descent = font.getmetrics()
             glyphs, bitmap = [(0, 0, 0, 0, 0, 0)], bytearray()

@@ -7,6 +7,10 @@
 #include "voidos/hal.h"
 #include "board.h"
 
+#ifndef VOIDOS_VERSION
+#define VOIDOS_VERSION "dev"     /* the firmware Makefile passes VERSION */
+#endif
+
 void display_backlight(int level);
 void display_sleep(int on);
 void touch_sleep(int on);
@@ -25,7 +29,7 @@ void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s);
 void hal_clock_date(int *y, int *mo, int *d, int *dow);
 int hal_clock_synced(void);
 uint32_t hal_clock_tod_ms(void);
-extern const lv_font_t kenney9, kenney16, kenney24, kenney56;
+extern const lv_font_t kenney9, kenney12, kenney16, kenney24, kenney56;
 
 /* ---- state -------------------------------------------------------------- */
 
@@ -332,17 +336,28 @@ static void nav_to(scr_t s);
 static void mk_header(lv_obj_t *parent, const char *title, int with_back)
 {
     /* concept style: small clock top-left, title top-right, hairline */
+    /* back is the most-hit control in the OS: 40x30 visual (was 30x24)
+       plus an invisible 8 px margin, so the whole top-left corner
+       (0..52 x 0..42) takes the tap. Nothing else sits there. */
     char tb[8];
-    lv_snprintf(tb, sizeof tb, "%d:%02d", hal_clock_hour(),
-                hal_clock_minute());
-    mk_label(parent, &kenney9, C_MUTED, with_back ? 46 : 12, 13, tb);
-    if (with_back)
-        mk_btn(parent, "<", 10, 8, 30, 24, C_BG, back_cb);
-    lv_obj_t *t = mk_label(parent, &kenney16, C_ACCENT, 0, 10, title);
+    int clock_x = with_back ? 54 : 12;
+    if (with_back) {
+        lv_obj_t *b = mk_btn(parent, "<", 4, 4, 40, 30, C_BG, back_cb);
+        lv_obj_set_style_text_font(lv_obj_get_child(b, 0), &kenney16, 0);
+        lv_obj_set_ext_click_area(b, 8);
+    }
+    lv_obj_t *t = mk_label(parent, &kenney16, C_ACCENT, 0, 11, title);
     lv_obj_update_layout(t);
     lv_obj_set_x(t, 226 - lv_obj_get_width(t));
+    /* small clock between back and title, only when the title leaves
+       room for it (long titles at 16 px would collide) */
+    lv_snprintf(tb, sizeof tb, "%d:%02d", hal_clock_hour(),
+                hal_clock_minute());
+    if (226 - lv_obj_get_width(t) - clock_x >=
+        (int)lv_text_get_width(tb, strlen(tb), &kenney12, 0) + 8)
+        mk_label(parent, &kenney12, C_MUTED, clock_x, 14, tb);
     lv_obj_t *line = lv_obj_create(parent);
-    lv_obj_set_pos(line, 12, 34);
+    lv_obj_set_pos(line, 12, 37);
     lv_obj_set_size(line, 216, 1);
     lv_obj_set_style_bg_color(line, lv_color_hex(0x1A2432), 0);
     lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
@@ -379,8 +394,14 @@ static uint32_t notif_sel_uid;
    Instant switches are faster than this chip can animate. */
 static int pend_dir;   /* kept for dir_nav bookkeeping; no animation */
 
+static int set_page;          /* Settings page, see build_settings */
+static int swipe_handled;     /* a swipe acted without changing screen */
+
 static void nav_to(scr_t s)
 {
+    if (s == SCR_SETTINGS && cur != SCR_SETTINGS && cur != SCR_SETTIME &&
+        cur != SCR_DIAG)
+        set_page = 0;
     if (cur == SCR_NOTIF && s != SCR_NOTIF)
         notif_reset_view();
     if (s == SCR_FACE || s == SCR_CC || s == SCR_LAUNCHER) {
@@ -465,6 +486,15 @@ static void dir_nav(int cst_dir, int start_x)
     } else if (cur == SCR_CARDIO) {
         if (cst_dir == 4)
             nav_to(SCR_FACE);
+    } else if (cur == SCR_SETTINGS && (cst_dir == 1 || cst_dir == 2)) {
+        /* slide up = next page, slide down = previous */
+        int last = (13 - 1) / 5;
+        int np = set_page + (cst_dir == 2 ? 1 : -1);
+        if (np >= 0 && np <= last) {
+            set_page = np;
+            rebuild();
+        }
+        swipe_handled = 1;
     } else {
         if (cst_dir == 4)
             nav_back();
@@ -480,8 +510,9 @@ int ui_swipe(int cst_dir, int start_x)
     if (cur == SCR_LAUNCHER && cst_dir != 1 && cst_dir != 2)
         return 0;
     scr_t before = cur;
+    swipe_handled = 0;
     dir_nav(cst_dir, start_x);
-    return cur != before;
+    return cur != before || swipe_handled;
 }
 
 static uint32_t ui_start_ms;
@@ -664,11 +695,41 @@ static void ccw_build_list(void)
         ccw_focus = 0;
 }
 
+/* 2.0: ring nodes are 17 px hexes (were 13) on a ring centred lower,
+   below the header; each node takes taps out to CC_SAT_HIT px with the
+   nearest node winning (was a 22 px radius the hub test overlapped).
+   The bottom hint went: at 12 px it wrapped and hit the bottom node. */
+#define CC_CY      140
+#define CC_HUB     52
+#define CC_HUB_HIT 54
+#define CC_SAT     17
+#define CC_SAT_HIT 32
 static void ccw_pos(int i, int *x, int *y)
 {
     float a = (-90.0f + i * (360.0f / ccw_n)) * 0.0174533f;
-    *x = 120 + (int)(cosf(a) * 92);
-    *y = 120 + (int)(sinf(a) * 66);
+    *x = 120 + (int)(cosf(a) * 94);
+    *y = CC_CY + (int)(sinf(a) * 74);
+}
+
+/* tap -> ring index 0..ccw_n-1, ccw_n for the hub, -1 nothing */
+static int ccw_hit(int px, int py)
+{
+    int best = -1, bd = CC_SAT_HIT * CC_SAT_HIT;
+    for (int i = 0; i < ccw_n; i++) {
+        int x, y;
+        ccw_pos(i, &x, &y);
+        int d = (px - x) * (px - x) + (py - y) * (py - y);
+        if (d < bd) {
+            bd = d;
+            best = i;
+        }
+    }
+    if (best >= 0)
+        return best;
+    int dx = px - 120, dy = py - CC_CY;
+    if (dx * dx + dy * dy < CC_HUB_HIT * CC_HUB_HIT)
+        return ccw_n;
+    return -1;
 }
 
 static void ccw_draw(lv_event_t *e)
@@ -684,16 +745,16 @@ static void ccw_draw(lv_event_t *e)
                             : (on ? lv_color_mix(ccw_def[d].col,
                                                  lv_color_black(), 120)
                                   : lv_color_hex(0x38425A));
-        hex_stroke(layer, x, y, foc ? 16 : 13, sc, foc ? 2 : 1);
-        draw_glyph(layer, ccw_def[d].glyph, x, y, 6,
+        hex_stroke(layer, x, y, foc ? CC_SAT + 3 : CC_SAT, sc, foc ? 2 : 1);
+        draw_glyph(layer, ccw_def[d].glyph, x, y, 8,
                    on || foc ? ccw_def[d].col : lv_color_hex(0x5A6478));
     }
     /* hub = the focused control itself, not just a bigger icon */
-    hex_stroke(layer, 120, 120, 52, fc, 2);
-    hex_stroke(layer, 120, 120, 47,
+    hex_stroke(layer, 120, CC_CY, CC_HUB, fc, 2);
+    hex_stroke(layer, 120, CC_CY, CC_HUB - 5,
                lv_color_mix(fc, lv_color_black(), 170), 1);
-    draw_glyph(layer, ccw_def[fd].glyph, 120, 94, 11, fc);
-    draw_txt_c(layer, &kenney9, lv_color_hex(0x8A94A8), 120, 108,
+    draw_glyph(layer, ccw_def[fd].glyph, 120, CC_CY - 30, 10, fc);
+    draw_txt_c(layer, &kenney12, lv_color_hex(0x8A94A8), 120, CC_CY - 16,
                ccw_def[fd].name);
     char v[12];
     if (fd == CCW_BATT)
@@ -706,15 +767,13 @@ static void ccw_draw(lv_event_t *e)
         lv_snprintf(v, sizeof v, "%s", ccw_on(fd) ? "LINKED" : "OPEN");
     else
         lv_snprintf(v, sizeof v, "%s", ccw_on(fd) ? "ON" : "OFF");
-    draw_txt_c(layer, &kenney16, ccw_on(fd) ? fc : C_MUTED, 120, 122, v);
+    draw_txt_c(layer, &kenney16, ccw_on(fd) ? fc : C_MUTED, 120, CC_CY - 2, v);
     if (fd == CCW_BRIGHT)
-        seg_bar(layer, 76, 144, 88, 7, 10, brightness, fc,
+        seg_bar(layer, 88, CC_CY + 18, 64, 6, 10, brightness, fc,
                 lv_color_hex(0x232C3C));
     else if (fd == CCW_BATT)
-        seg_bar(layer, 76, 144, 88, 7, 10, hal_battery_pct(), fc,
+        seg_bar(layer, 88, CC_CY + 18, 64, 6, 10, hal_battery_pct(), fc,
                 lv_color_hex(0x232C3C));
-    draw_txt_c(layer, &kenney9, lv_color_hex(0x38425A), 120, 226,
-               "DRAG TO SELECT - TAP CENTRE");
 }
 
 static void ccw_event(lv_event_t *e)
@@ -744,21 +803,12 @@ static void ccw_event(lv_event_t *e)
         ccw_dx = 0;
         if (ccw_drag >= 10)
             return;
-        int dx = ccw_press.x - 120, dy = ccw_press.y - 120;
-        if (dx * dx + dy * dy < 56 * 56) {
+        int h = ccw_hit(ccw_press.x, ccw_press.y);
+        if (h == ccw_n) {
             ccw_activate(ccw_list[ccw_focus]);   /* hub tap = act */
-            return;
-        }
-        for (int i = 0; i < ccw_n; i++) {
-            int x, y;
-            ccw_pos(i, &x, &y);
-            dx = ccw_press.x - x;
-            dy = ccw_press.y - y;
-            if (dx * dx + dy * dy < 22 * 22) {
-                ccw_focus = i;          /* satellites only focus */
-                lv_obj_invalidate(ccw_canvas);
-                return;
-            }
+        } else if (h >= 0) {
+            ccw_focus = h;              /* satellites only focus */
+            lv_obj_invalidate(ccw_canvas);
         }
     }
 }
@@ -815,6 +865,9 @@ static void draw_txt(lv_layer_t *layer, const lv_font_t *f, lv_color_t c,
     ld.color = c;
     ld.align = al;
     ld.text = s;
+#ifdef UISNAP_TEXT_HOOK
+    UISNAP_TEXT_HOOK(f, s, x, y, w);    /* host tap/overflow audit */
+#endif
     lv_area_t a = {x, y, x + w - 1, y + 40};
     lv_draw_label(layer, &ld, &a);
 }
@@ -1167,12 +1220,45 @@ static lv_obj_t *lc_canvas;
 static lv_point_t lc_press;
 static int lc_dx, lc_drag_dist;
 
-/* satellite ring positions, focused mirrored in the hub */
+/* satellite ring positions, focused mirrored in the hub.
+   2.0: nodes are 20 px hexes (were 16) on a wider ring, and each node
+   takes taps out to LC_SAT_HIT px, nearest node wins, so the tap area
+   per node is about 60 px across (was a 48 px circle that the hub tap
+   test partly ate). The per-node names and the bottom hint went: at
+   12 px they collided with the bigger nodes, and the hub already
+   names the focused app. */
+#define LC_CY      120
+#define LC_HUB     58     /* hub hex circumradius */
+#define LC_HUB_HIT 60
+#define LC_SAT     20
+#define LC_SAT_HIT 34
 static void lc_pos(int i, int *x, int *y)
 {
     float a = (-90.0f + i * 45.0f) * 0.0174533f;
-    *x = 120 + (int)(cosf(a) * 86);
-    *y = 118 + (int)(sinf(a) * 78);
+    *x = 120 + (int)(cosf(a) * 92);
+    *y = LC_CY + (int)(sinf(a) * 84);
+}
+
+/* tap -> 0..LC_N-1 node, LC_N hub, -1 nothing. Nodes first so the
+   ring keeps its full area where it meets the hub. */
+static int lc_hit(int px, int py)
+{
+    int best = -1, bd = LC_SAT_HIT * LC_SAT_HIT;
+    for (int i = 0; i < LC_N; i++) {
+        int x, y;
+        lc_pos(i, &x, &y);
+        int d = (px - x) * (px - x) + (py - y) * (py - y);
+        if (d < bd) {
+            bd = d;
+            best = i;
+        }
+    }
+    if (best >= 0)
+        return best;
+    int dx = px - 120, dy = py - LC_CY;
+    if (dx * dx + dy * dy < LC_HUB_HIT * LC_HUB_HIT)
+        return LC_N;
+    return -1;
 }
 
 static void lc_draw(lv_event_t *e)
@@ -1182,7 +1268,7 @@ static void lc_draw(lv_event_t *e)
     for (int i = 0; i < LC_N; i++) {
         int x, y;
         lc_pos(i, &x, &y);
-        float dx = x - 120, dy = y - 120;
+        float dx = x - 120, dy = y - LC_CY;
         float d = sqrtf(dx * dx + dy * dy);
         if (d < 1)
             continue;
@@ -1192,31 +1278,27 @@ static void lc_draw(lv_event_t *e)
                                                 lv_color_black(), 170)
                                  : lv_color_hex(0x232C3C);
         ln.width = 1;
-        ln.p1.x = 120 + (int)(dx / d * 60);
-        ln.p1.y = 120 + (int)(dy / d * 60);
-        ln.p2.x = x - (int)(dx / d * 26);
-        ln.p2.y = y - (int)(dy / d * 26);
+        ln.p1.x = 120 + (int)(dx / d * (LC_HUB + 2));
+        ln.p1.y = LC_CY + (int)(dy / d * (LC_HUB + 2));
+        ln.p2.x = x - (int)(dx / d * (LC_SAT + 4));
+        ln.p2.y = y - (int)(dy / d * (LC_SAT + 4));
         lv_draw_line(layer, &ln);
     }
     for (int i = 0; i < LC_N; i++) {
         int x, y, on = i == lc_focus;
         lc_pos(i, &x, &y);
         lv_color_t c = on ? lc_apps[i].col : lv_color_hex(0x38425A);
-        hex_stroke(layer, x, y, on ? 19 : 16, c, on ? 2 : 1);
-        draw_glyph(layer, lc_apps[i].glyph, x, y - 2, 7,
+        hex_stroke(layer, x, y, on ? LC_SAT + 3 : LC_SAT, c, on ? 2 : 1);
+        draw_glyph(layer, lc_apps[i].glyph, x, y, 9,
                    on ? lc_apps[i].col : lv_color_hex(0x5A6478));
-        draw_txt_c(layer, &kenney9,
-                   on ? lc_apps[i].col : lv_color_hex(0x4A5566), x, y + 23,
-                   lc_apps[i].name);
     }
     /* hub: the focused app, big, double-stroked */
     lv_color_t fc = lc_apps[lc_focus].col;
-    hex_stroke(layer, 120, 118, 58, fc, 2);
-    hex_stroke(layer, 120, 118, 52,
+    hex_stroke(layer, 120, LC_CY, LC_HUB, fc, 2);
+    hex_stroke(layer, 120, LC_CY, LC_HUB - 6,
                lv_color_mix(fc, lv_color_black(), 170), 1);
-    draw_glyph(layer, lc_apps[lc_focus].glyph, 120, 102, 17, fc);
-    draw_txt_c(layer, &kenney16, fc, 120, 130, lc_apps[lc_focus].name);
-    draw_txt_c(layer, &kenney9, lv_color_hex(0x38425A), 120, 226, "DRAG TO SELECT - TAP TO OPEN");
+    draw_glyph(layer, lc_apps[lc_focus].glyph, 120, LC_CY - 14, 16, fc);
+    draw_txt_c(layer, &kenney16, fc, 120, LC_CY + 12, lc_apps[lc_focus].name);
 }
 
 static void lc_event(lv_event_t *e)
@@ -1247,23 +1329,14 @@ static void lc_event(lv_event_t *e)
         lc_dx = 0;
         if (lc_drag_dist >= 10)
             return;
-        int dx = lc_press.x - 120, dy = lc_press.y - 118;
-        if (dx * dx + dy * dy < 62 * 62) {
+        int h = lc_hit(lc_press.x, lc_press.y);
+        if (h == LC_N) {
             buzz(35);
             nav_to(lc_apps[lc_focus].scr);   /* hub tap opens focused */
-            return;
-        }
-        for (int i = 0; i < LC_N; i++) {
-            int x, y;
-            lc_pos(i, &x, &y);
-            dx = lc_press.x - x;
-            dy = lc_press.y - y;
-            if (dx * dx + dy * dy < 24 * 24) {
-                lc_focus = i;           /* nodes only take focus */
-                buzz(20);               /* haptic tick = selection */
-                lv_obj_invalidate(lc_canvas);
-                return;
-            }
+        } else if (h >= 0) {
+            lc_focus = h;               /* nodes only take focus */
+            buzz(20);                   /* haptic tick = selection */
+            lv_obj_invalidate(lc_canvas);
         }
     }
 }
@@ -1368,7 +1441,7 @@ static void build_workout(lv_obj_t *r)
     mk_header(r, "WORKOUT", 1);
     static const char *rt[3] = {"PUSH DAY", "PULL DAY", "LEG DAY"};
     for (int i = 0; i < 3; i++) {
-        lv_obj_t *b = mk_btn(r, rt[i], 20, 48 + i * 32, 200, 28, C_FILL,
+        lv_obj_t *b = mk_btn(r, rt[i], 20, 44 + i * 34, 200, 32, C_FILL,
                              routine_cb);
         lv_obj_set_user_data(b, (void *)(intptr_t)i);
     }
@@ -1445,7 +1518,7 @@ static void build_sleep(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "SLEEP", 1);
-    mk_label_c(r, &kenney9, C_MUTED, 120, 46, s_in_bed ? "IN BED" : "LAST NIGHT");
+    mk_label_c(r, &kenney12, C_MUTED, 120, 46, s_in_bed ? "IN BED" : "LAST NIGHT");
     char buf[24];
     if (s_in_bed)
         fmt_ms(hal_millis() - s_start_ms, buf);
@@ -1457,7 +1530,7 @@ static void build_sleep(lv_obj_t *r)
                              200, 52, s_in_bed ? C_WARN : C_ACCENT, sleep_cb);
         lv_obj_set_user_data(b, (void *)(intptr_t)1);
     } else {
-        mk_label_c(r, &kenney9, C_MUTED, 120, 128, "TRACKING IS OFF");
+        mk_label_c(r, &kenney12, C_MUTED, 120, 128, "TRACKING IS OFF");
     }
     lv_obj_t *t = mk_toggle(r, s_track ? "TRACKING ON" : "TRACKING OFF",
                             20, 178, 200, s_track, sleep_cb);
@@ -1468,7 +1541,7 @@ static void build_s_done(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "NIGHT", 1);
-    mk_label_c(r, &kenney9, C_MUTED, 120, 76, "TIME IN BED");
+    mk_label_c(r, &kenney12, C_MUTED, 120, 76, "TIME IN BED");
     char buf[16];
     fmt_ms(s_last_ms, buf);
     mk_label_c(r, &kenney24, C_WHITE, 120, 98, buf);
@@ -1495,10 +1568,11 @@ static void build_water(lv_obj_t *r)
     char buf[24];
     lv_snprintf(buf, sizeof buf, "%d ML", water_ml);
     mk_label_c(r, &kenney24, C_ACCENT, 120, 82, buf);
-    mk_label_c(r, &kenney9, C_MUTED, 120, 118, "GOAL 2000 ML");
+    mk_label_c(r, &kenney12, C_MUTED, 120, 118, "GOAL 2000 ML");
     lv_obj_t *bar = lv_bar_create(r);
     lv_obj_set_pos(bar, 30, 138);
     lv_obj_set_size(bar, 180, 16);
+    lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);   /* display only */
     lv_bar_set_range(bar, 0, 2000);
     lv_bar_set_value(bar, water_ml > 2000 ? 2000 : water_ml, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(bar, C_FILL, LV_PART_MAIN);
@@ -1518,42 +1592,47 @@ static void build_clock(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "CLOCK", 1);
+    /* tabs: 40 px tall (were 70x28, and STOPWATCH at 16 px overflowed
+       its tab). Widths follow the label so all three fit one row. */
     static const char *tab[3] = {"STOPWATCH", "TIMER", "ALARM"};
+    static const int tab_x[3] = {4, 110, 174}, tab_w[3] = {104, 62, 62};
     for (int i = 0; i < 3; i++) {
-        lv_obj_t *b = mk_btn(r, tab[i], 14 + i * 74, 40, 70, 28,
+        lv_obj_t *b = mk_btn(r, tab[i], tab_x[i], 44, tab_w[i], 40,
                              clock_tab == i ? C_ACCENT : C_FILL, clock_cb);
         lv_obj_set_user_data(b, (void *)(intptr_t)(20 + i));
-        lv_obj_set_style_text_color(lv_obj_get_child(b, 0),
-                                    clock_tab == i ? C_BG : C_WHITE, 0);
+        lv_obj_t *l = lv_obj_get_child(b, 0);
+        lv_obj_set_style_text_font(l, &kenney12, 0);
+        lv_obj_set_style_text_color(l, clock_tab == i ? C_BG : C_WHITE, 0);
     }
     if (clock_tab == 0) {
         char buf[16];
         fmt_ms(sw_acc + (sw_running ? hal_millis() - sw_t0 : 0), buf);
-        lbl_time_big = mk_label_c(r, &kenney24, C_WHITE, 120, 96, buf);
+        lbl_time_big = mk_label_c(r, &kenney24, C_WHITE, 120, 104, buf);
         lv_obj_t *b;
-        b = mk_btn(r, sw_running ? "STOP" : "START", 20, 140, 97, 40,
+        b = mk_btn(r, sw_running ? "STOP" : "START", 6, 150, 111, 60,
                    C_ACCENT, clock_cb);
         lv_obj_set_user_data(b, (void *)(intptr_t)10);
-        b = mk_btn(r, "RESET", 123, 140, 97, 40, C_FILL, clock_cb);
+        b = mk_btn(r, "RESET", 123, 150, 111, 60, C_FILL, clock_cb);
         lv_obj_set_user_data(b, (void *)(intptr_t)11);
     } else if (clock_tab == 1) {
         if (timer_done) {
-            mk_label_c(r, &kenney16, C_WARN, 120, 96, "TIME'S UP");
-            lv_obj_t *b = mk_btn(r, "DISMISS", 20, 140, 200, 40, C_FILL,
+            mk_label_c(r, &kenney16, C_WARN, 120, 108, "TIME'S UP");
+            lv_obj_t *b = mk_btn(r, "DISMISS", 6, 150, 228, 60, C_FILL,
                                  clock_cb);
             lv_obj_set_user_data(b, (void *)(intptr_t)12);
         } else if (timer_end_ms) {
             char buf[16];
             fmt_ms(timer_end_ms - hal_millis(), buf);
-            lbl_time_big = mk_label_c(r, &kenney24, C_WARN, 120, 96, buf);
-            lv_obj_t *b = mk_btn(r, "CANCEL", 20, 140, 200, 40, C_FILL,
+            lbl_time_big = mk_label_c(r, &kenney24, C_WARN, 120, 104, buf);
+            lv_obj_t *b = mk_btn(r, "CANCEL", 6, 150, 228, 60, C_FILL,
                                  clock_cb);
             lv_obj_set_user_data(b, (void *)(intptr_t)13);
         } else {
+            /* presets: 72x64 (were 68x40) */
             static const char *p[3] = {"1 MIN", "5 MIN", "10 MIN"};
             for (int i = 0; i < 3; i++) {
-                lv_obj_t *b = mk_btn(r, p[i], 14 + i * 74, 100, 68, 40, C_FILL,
-                                     clock_cb);
+                lv_obj_t *b = mk_btn(r, p[i], 6 + i * 78, 116, 72, 64,
+                                     C_FILL, clock_cb);
                 lv_obj_set_user_data(b, (void *)(intptr_t)(30 + i));
             }
         }
@@ -1561,29 +1640,32 @@ static void build_clock(lv_obj_t *r)
         char buf[8];
         lv_snprintf(buf, sizeof buf, "%02d:%02d", alarm_h, alarm_m);
         if (alarm_ringing) {
-            mk_label_c(r, &kenney24, C_WARN, 120, 84, buf);
-            lv_obj_t *b = mk_btn(r, "STOP", 20, 130, 200, 44, C_WARN,
+            mk_label_c(r, &kenney24, C_WARN, 120, 100, buf);
+            lv_obj_t *b = mk_btn(r, "STOP", 6, 140, 228, 72, C_WARN,
                                  clock_cb);
             lv_obj_set_user_data(b, (void *)(intptr_t)15);
             return;
         }
+        /* steppers 62x48 / 62x46 (were 40x36 and 40x28); the labels
+           now say what they step, so the "HOUR / 15 MIN" caption goes */
         lv_obj_t *b;
-        b = mk_btn(r, "-", 14, 78, 40, 36, C_FILL, clock_cb);
+        b = mk_btn(r, "-1H", 6, 92, 62, 48, C_FILL, clock_cb);
         lv_obj_set_user_data(b, (void *)(intptr_t)40);
-        mk_label_c(r, &kenney24, C_WHITE, 120, 84, buf);
-        b = mk_btn(r, "+", 186, 78, 40, 36, C_FILL, clock_cb);
+        mk_label_c(r, &kenney24, C_WHITE, 120, 103, buf);
+        b = mk_btn(r, "+1H", 172, 92, 62, 48, C_FILL, clock_cb);
         lv_obj_set_user_data(b, (void *)(intptr_t)41);
-        b = mk_btn(r, "-15", 14, 120, 40, 28, C_FILL, clock_cb);
+        b = mk_btn(r, "-15M", 6, 144, 62, 46, C_FILL, clock_cb);
         lv_obj_set_user_data(b, (void *)(intptr_t)42);
-        b = mk_btn(r, "+15", 186, 120, 40, 28, C_FILL, clock_cb);
+        b = mk_btn(r, "+15M", 172, 144, 62, 46, C_FILL, clock_cb);
         lv_obj_set_user_data(b, (void *)(intptr_t)43);
-        mk_label_c(r, &kenney9, C_MUTED, 120, 128, "HOUR / 15 MIN");
+        if (!hal_clock_synced()) {
+            mk_label_c(r, &kenney12, C_MUTED, 120, 153, "SET TIME");
+            mk_label_c(r, &kenney12, C_MUTED, 120, 167, "FIRST");
+        }
         b = mk_toggle(r, alarm_on ? "ALARM ON" : "ALARM OFF",
-                      20, 160, 200, alarm_on, clock_cb);
+                      6, 196, 228, alarm_on, clock_cb);
+        lv_obj_set_height(b, 40);
         lv_obj_set_user_data(b, (void *)(intptr_t)14);
-        mk_label_c(r, &kenney9, C_MUTED, 120, 200,
-                   hal_clock_synced() ? "VIBRATES UNTIL STOPPED"
-                                      : "SET THE TIME FIRST");
     }
 }
 
@@ -1626,21 +1708,69 @@ static void clock_cb(lv_event_t *e)
 static void settings_cb(lv_event_t *e);
 static void diag_open_cb(lv_event_t *e);
 
+/* Settings is a paged list: five full-width rows per page (216x34,
+   was a 60x15 pill per row), swipe up/down to page. Nothing here
+   scrolls, in keeping with the 1.6.2 no-scroll rule; paging rides the
+   same hardware gesture path the rest of the OS uses. */
+#define SET_ROWS     13
+#define SET_PER_PAGE 5
+
+static lv_obj_t *mk_row(lv_obj_t *r, int y, const char *name,
+                        const char *val, int on, lv_event_cb_t cb)
+{
+    lv_obj_t *b = mk_btn(r, name, 12, y, 216, 32, C_FILL, cb);
+    lv_obj_t *l = lv_obj_get_child(b, 0);
+    lv_obj_align(l, LV_ALIGN_LEFT_MID, 10, 0);
+    if (val) {
+        lv_obj_t *pill = lv_obj_create(b);
+        lv_obj_set_size(pill, 64, 22);
+        lv_obj_align(pill, LV_ALIGN_RIGHT_MID, -5, 0);
+        lv_obj_set_style_radius(pill, 3, 0);
+        lv_obj_set_style_border_width(pill, on ? 0 : 1, 0);
+        lv_obj_set_style_border_color(pill, C_EDGE, 0);
+        lv_obj_set_style_bg_color(pill, on ? C_ACCENT : C_BG, 0);
+        lv_obj_set_style_bg_opa(pill, LV_OPA_COVER, 0);
+        lv_obj_set_style_pad_all(pill, 0, 0);
+        lv_obj_remove_flag(pill, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t *vl = lv_label_create(pill);
+        lv_obj_set_style_text_font(vl, strlen(val) > 4 ? &kenney12 : &kenney16, 0);
+        lv_obj_set_style_text_color(vl, on ? C_BG : C_MUTED, 0);
+        lv_label_set_text(vl, val);
+        lv_obj_center(vl);
+    }
+    return b;
+}
+
 static void build_settings(lv_obj_t *r)
 {
     page_bg(r);
-    mk_header(r, "SETTINGS", 1);
+    {
+        char tt[16];
+        lv_snprintf(tt, sizeof tt, "SETTINGS %d/%d", set_page + 1,
+                    (SET_ROWS + SET_PER_PAGE - 1) / SET_PER_PAGE);
+        mk_header(r, tt, 1);
+    }
     static const char *rows[12] = {
         "DND", "AIRPLANE", "BLUETOOTH", "TORCH", "WATER LOCK",
-        "BRIGHTNESS", "CC: TORCH", "CC: WATER", "CC: PHONE",
+        "BRIGHTNESS", "CC TORCH", "CC WATER", "CC PHONE",
         "SET TIME", "FACE", "HEART RATE"
     };
     int vals[12] = {dnd_on, airplane_on, bt_on, torch_on, water_lock,
                     brightness, !(cc_hide & 1), !(cc_hide & 2),
                     !(cc_hide & 4), 1, face_dig, sensors_hr_on()};
-    for (int i = 0; i < 12; i++) {
-        int y = 40 + i * 15;
-        mk_label(r, &kenney9, C_WHITE, 18, y, rows[i]);
+    int first = set_page * SET_PER_PAGE;
+    for (int i = first; i < SET_ROWS && i < first + SET_PER_PAGE; i++) {
+        int y = 42 + (i - first) * 36;
+        if (i == 12) {
+            static const char *bs[5] = {"OFF", "START", "ON", "LINK",
+                                        "RETRY"};
+            int st = ble_status();
+            lv_obj_t *db = mk_row(r, y, "BLE / DIAG",
+                                  bs[st < 0 || st > 4 ? 4 : st],
+                                  st == 2 || st == 3, diag_open_cb);
+            (void)db;
+            continue;
+        }
         char v[8];
         if (i == 5)
             lv_snprintf(v, sizeof v, "%d%%", brightness);
@@ -1650,23 +1780,15 @@ static void build_settings(lv_obj_t *r)
             lv_snprintf(v, sizeof v, face_dig ? "DIGI" : "ANLG");
         else
             lv_snprintf(v, sizeof v, "%s", vals[i] ? "ON" : "OFF");
-        lv_obj_t *b = mk_btn(r, v, 162, y - 4, 60, 15,
-                             vals[i] ? C_ACCENT : C_FILL, settings_cb);
-        lv_obj_set_style_text_font(lv_obj_get_child(b, 0), &kenney9, 0);
-        lv_obj_set_style_text_color(lv_obj_get_child(b, 0),
-                                    vals[i] ? C_BG : C_MUTED, 0);
+        lv_obj_t *b = mk_row(r, y, rows[i], v,
+                             i == 9 || i == 10 ? 0 : vals[i], settings_cb);
         lv_obj_set_user_data(b, (void *)(intptr_t)i);
     }
-    static const char *bs[5] = {"BLE OFF", "BLE STARTING", "BLE VISIBLE",
-                                "BLE CONNECTED", "BLE RETRYING"};
-    int st = ble_status();
-    char fb[40];
-    lv_snprintf(fb, sizeof fb, "%s  DIAG >", bs[st < 0 || st > 4 ? 4 : st]);
-    lv_obj_t *db = mk_btn(r, fb, 30, 224, 180, 16, C_BG, diag_open_cb);
-    lv_obj_set_style_border_width(db, 0, 0);
-    lv_obj_set_style_text_font(lv_obj_get_child(db, 0), &kenney9, 0);
-    lv_obj_set_style_text_color(lv_obj_get_child(db, 0),
-                                st == 2 || st == 3 ? C_GOOD : C_MUTED, 0);
+    /* page hint along the bottom */
+    if (set_page < (SET_ROWS - 1) / SET_PER_PAGE)
+        mk_label_c(r, &kenney12, C_MUTED, 120, 223, "SWIPE UP FOR MORE");
+    else
+        mk_label_c(r, &kenney12, C_MUTED, 120, 223, "VOIDOS " VOIDOS_VERSION);
 }
 
 /* manual time set, like the reference watches: +/- on hour/minute,
@@ -1703,20 +1825,26 @@ static void build_settime(lv_obj_t *r)
         set_h = hal_clock_hour();
         set_m = hal_clock_minute();
     }
+    /* hour column left, minute column right, + above -, each 90x40
+       (1.6.2 had four 40x32 buttons, and hour + overlapped minute -) */
     char buf[8];
-    lv_snprintf(buf, sizeof buf, "%02d:%02d", set_h, set_m);
-    mk_label_c(r, &kenney24, C_WHITE, 120, 96, buf);
-    lv_obj_set_user_data(mk_btn(r, "-", 42, 140, 40, 32, C_FILL, settime_cb),
-                         (void *)(intptr_t)0);
-    lv_obj_set_user_data(mk_btn(r, "+", 88, 140, 40, 32, C_FILL, settime_cb),
+    mk_label_c(r, &kenney12, C_MUTED, 65, 44, "HOUR");
+    mk_label_c(r, &kenney12, C_MUTED, 175, 44, "MIN");
+    lv_snprintf(buf, sizeof buf, "%02d", set_h);
+    mk_label_c(r, &kenney24, C_WHITE, 65, 60, buf);
+    mk_label_c(r, &kenney24, C_ACCENT, 120, 60, ":");
+    lv_snprintf(buf, sizeof buf, "%02d", set_m);
+    mk_label_c(r, &kenney24, C_WHITE, 175, 60, buf);
+    lv_obj_set_user_data(mk_btn(r, "+", 20, 96, 90, 40, C_FILL, settime_cb),
                          (void *)(intptr_t)1);
-    lv_obj_set_user_data(mk_btn(r, "-", 112, 140, 40, 32, C_FILL, settime_cb),
-                         (void *)(intptr_t)2);
-    lv_obj_set_user_data(mk_btn(r, "+", 158, 140, 40, 32, C_FILL, settime_cb),
+    lv_obj_set_user_data(mk_btn(r, "-", 20, 142, 90, 40, C_FILL, settime_cb),
+                         (void *)(intptr_t)0);
+    lv_obj_set_user_data(mk_btn(r, "+", 130, 96, 90, 40, C_FILL, settime_cb),
                          (void *)(intptr_t)3);
-    lv_obj_set_user_data(mk_btn(r, "DONE", 70, 186, 100, 30, C_ACCENT,
+    lv_obj_set_user_data(mk_btn(r, "-", 130, 142, 90, 40, C_FILL, settime_cb),
+                         (void *)(intptr_t)2);
+    lv_obj_set_user_data(mk_btn(r, "DONE", 50, 190, 140, 42, C_ACCENT,
                                 settime_cb), (void *)(intptr_t)4);
-    mk_label_c(r, &kenney9, C_MUTED, 120, 224, "24H · SAVED ON DONE");
 }
 
 static void settings_cb(lv_event_t *e)
@@ -1848,10 +1976,42 @@ static void st_value(int i, char *v, char *u)
     }
 }
 
+/* 2.0: the node row spreads to the full width (40 px pitch, was 35)
+   with 17 px hexes (were 14); each node takes taps out to ST_SAT_HIT px,
+   nearest node wins, and the workout strip below takes the whole
+   bottom band. */
+#define ST_CY       106
+#define ST_HUB_HIT  58
+#define ST_SAT      17
+#define ST_SAT_HIT  30
+#define ST_STRIP_Y0 210
 static void st_pos(int i, int *x, int *y)
 {
-    *x = 33 + i * 35;
-    *y = 196;
+    *x = 19 + i * 40;
+    *y = 186;
+}
+
+/* tap -> -2 workout strip, ST_N hub, 0..ST_N-1 node, -1 nothing */
+static int st_hit(int px, int py)
+{
+    if (py >= ST_STRIP_Y0 && py <= 239)
+        return -2;
+    int best = -1, bd = ST_SAT_HIT * ST_SAT_HIT;
+    for (int i = 0; i < ST_N; i++) {
+        int x, y;
+        st_pos(i, &x, &y);
+        int d = (px - x) * (px - x) + (py - y) * (py - y);
+        if (d < bd) {
+            bd = d;
+            best = i;
+        }
+    }
+    if (best >= 0)
+        return best;
+    int dx = px - 120, dy = py - ST_CY;
+    if (dx * dx + dy * dy < ST_HUB_HIT * ST_HUB_HIT)
+        return ST_N;
+    return -1;
 }
 
 static void st_draw(lv_event_t *e)
@@ -1860,10 +2020,10 @@ static void st_draw(lv_event_t *e)
     for (int i = 0; i < ST_N; i++) {
         int x, y, foc = i == st_focus;
         st_pos(i, &x, &y);
-        hex_stroke(layer, x, y, foc ? 18 : 14,
+        hex_stroke(layer, x, y, foc ? ST_SAT + 3 : ST_SAT,
                    foc ? st_def[i].col : lv_color_hex(0x38425A),
                    foc ? 2 : 1);
-        draw_glyph(layer, st_def[i].glyph, x, y, 6,
+        draw_glyph(layer, st_def[i].glyph, x, y, 8,
                    foc ? st_def[i].col : lv_color_hex(0x5A6478));
     }
     lv_color_t fc = st_def[st_focus].col;
@@ -1874,9 +2034,9 @@ static void st_draw(lv_event_t *e)
     char v[16], u[12];
     st_value(st_focus, v, u);
     draw_txt_c(layer, &kenney24, fc, 120, 96, v);
-    draw_txt_c(layer, &kenney9, lv_color_hex(0x8A94A8), 120, 124,
+    draw_txt_c(layer, &kenney12, lv_color_hex(0x8A94A8), 120, 124,
                st_def[st_focus].name);
-    draw_txt_c(layer, &kenney9, lv_color_mix(fc, lv_color_black(), 140),
+    draw_txt_c(layer, &kenney12, lv_color_mix(fc, lv_color_black(), 140),
                120, 136, u);
     /* workout status strip — tap opens the workout app */
     lv_draw_rect_dsc_t bo;
@@ -1885,18 +2045,18 @@ static void st_draw(lv_event_t *e)
     bo.border_color = lv_color_hex(0x38425A);
     bo.border_opa = LV_OPA_COVER;
     bo.bg_opa = LV_OPA_TRANSP;
-    lv_area_t wb = {22, 218, 218, 232};
+    lv_area_t wb = {12, 213, 228, 235};
     lv_draw_rect(layer, &bo, &wb);
     char ws[28];
     if (w_active)
         lv_snprintf(ws, sizeof ws, "WORKOUT LIVE - %d SETS", w_sets);
     else if (w_last_ms)
-        lv_snprintf(ws, sizeof ws, "LAST WORKOUT - %uM %d SETS",
+        lv_snprintf(ws, sizeof ws, "LAST %uM - %d SETS",
                     (unsigned)(w_last_ms / 60000u), w_last_sets);
     else
         lv_snprintf(ws, sizeof ws, "WORKOUT - NONE YET");
-    draw_txt_c(layer, &kenney9,
-               w_active ? C_WARN : lv_color_hex(0x5A6478), 120, 221, ws);
+    draw_txt_c(layer, &kenney12,
+               w_active ? C_WARN : lv_color_hex(0x5A6478), 120, 217, ws);
 }
 
 static void st_event(lv_event_t *e)
@@ -1926,30 +2086,19 @@ static void st_event(lv_event_t *e)
         st_dx = 0;
         if (st_drag >= 10)
             return;
-        if (st_press.y >= 214 && st_press.y <= 236) {
+        int h = st_hit(st_press.x, st_press.y);
+        if (h == -2) {
             buzz(35);
             nav_to(SCR_WORKOUT);       /* footer strip */
-            return;
-        }
-        int dx = st_press.x - 120, dy = st_press.y - 106;
-        if (dx * dx + dy * dy < 58 * 58) {
+        } else if (h == ST_N) {
             if (st_def[st_focus].to >= 0) {
                 buzz(35);
                 nav_to((scr_t)st_def[st_focus].to);
             }
-            return;
-        }
-        for (int i = 0; i < ST_N; i++) {
-            int x, y;
-            st_pos(i, &x, &y);
-            dx = st_press.x - x;
-            dy = st_press.y - y;
-            if (dx * dx + dy * dy < 20 * 20) {
-                st_focus = i;
-                buzz(20);
-                lv_obj_invalidate(st_canvas);
-                return;
-            }
+        } else if (h >= 0) {
+            st_focus = h;
+            buzz(20);
+            lv_obj_invalidate(st_canvas);
         }
     }
 }
@@ -2062,32 +2211,33 @@ static void build_notif(lv_obj_t *r)
             rebuild();
             return;
         }
-        mk_btn(r, "<", 12, 10, 36, 26, C_FILL, notif_back_cb);
-        mk_label(r, &kenney9, C_MUTED, 56, 16,
+        lv_obj_set_ext_click_area(
+            mk_btn(r, "<", 12, 10, 36, 26, C_FILL, notif_back_cb), 8);
+        mk_label(r, &kenney12, C_MUTED, 56, 16,
                  v->app[0] ? v->app : "NOTIFICATION");
         lv_obj_t *t = mk_label(r, &kenney16, C_WHITE, 16, 44,
                                v->title[0] ? v->title : "(NO TITLE)");
         lv_obj_set_width(t, 208);
         lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP);
-        lv_obj_t *m = mk_label(r, &kenney9, C_MUTED, 16, 78, v->msg);
+        lv_obj_t *m = mk_label(r, &kenney12, C_MUTED, 16, 78, v->msg);
         lv_obj_set_width(m, 208);
         lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
 
         char ago[16];
         unsigned mins = (hal_millis() - v->rx_ms) / 60000u;
         lv_snprintf(ago, sizeof ago, mins ? "%uM AGO" : "JUST NOW", mins);
-        mk_label(r, &kenney9, C_MUTED, 160, 16, ago);
+        mk_label(r, &kenney12, C_MUTED, 160, 16, ago);
         if (notif_reply) {
-            mk_label_c(r, &kenney9, C_MUTED, 120, 158,
+            mk_label_c(r, &kenney12, C_MUTED, 120, 158,
                        "OPEN ON PHONE AND REPLY?");
-            mk_btn(r, "YES", 16, 186, 100, 34, C_ACCENT, notif_send_cb);
-            mk_btn(r, "NO", 124, 186, 100, 34, C_FILL, notif_back_cb);
+            mk_btn(r, "YES", 16, 182, 100, 42, C_ACCENT, notif_send_cb);
+            mk_btn(r, "NO", 124, 182, 100, 42, C_FILL, notif_back_cb);
         } else {
             if (v->has_pos)
-                mk_btn(r, "REPLY", 16, 186, 100, 34, C_FILL,
+                mk_btn(r, "REPLY", 16, 182, 100, 42, C_FILL,
                        notif_reply_cb);
             mk_btn(r, "DISMISS", v->has_pos ? 124 : 16,
-                   186, v->has_pos ? 100 : 208, 34, C_FILL,
+                   182, v->has_pos ? 100 : 208, 42, C_FILL,
                    notif_dismiss_cb);
         }
         return;
@@ -2101,21 +2251,21 @@ static void build_notif(lv_obj_t *r)
     }
 
     if (!ble_connected()) {
-        mk_label_c(r, &kenney9, C_WARN, 120, 110, "PHONE NOT CONNECTED");
-        mk_label_c(r, &kenney9, C_MUTED, 120, 130,
+        mk_label_c(r, &kenney12, C_WARN, 120, 110, "PHONE NOT CONNECTED");
+        mk_label_c(r, &kenney12, C_MUTED, 120, 130,
                    "PAIR FOR NOTIFICATIONS");
         return;
     }
     if (ancs_state() < 6 /* ST_LIVE */) {
-        mk_label_c(r, &kenney9, C_MUTED, 120, 110, "SYNCING...");
-        mk_label_c(r, &kenney9, C_MUTED, 120, 130,
+        mk_label_c(r, &kenney12, C_MUTED, 120, 110, "SYNCING...");
+        mk_label_c(r, &kenney12, C_MUTED, 120, 130,
                    "ANCS HANDSHAKE");
         return;
     }
     if (!ancs_count()) {
         mk_icon_at(r, 13, 0, 108, 80);   /* cloud */
         mk_label_c(r, &kenney16, C_WHITE, 120, 118, "INBOX ZERO");
-        mk_label_c(r, &kenney9, C_MUTED, 120, 140, "ALL CAUGHT UP");
+        mk_label_c(r, &kenney12, C_MUTED, 120, 140, "ALL CAUGHT UP");
         return;
     }
 
@@ -2150,7 +2300,7 @@ static void build_notif(lv_obj_t *r)
         lv_obj_remove_flag(dot,
                            LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
 labels:
-        mk_label(row, &kenney9, C_MUTED, 24, 6,
+        mk_label(row, &kenney12, C_MUTED, 24, 6,
                  v->app[0] ? v->app : "APP");
         lv_obj_t *tl = mk_label(row, &kenney16, C_WHITE, 24, 20,
                                 v->title[0] ? v->title : v->msg);
@@ -2187,7 +2337,7 @@ static void cardio_draw(lv_event_t *e)
     if (!locked) {
         draw_glyph(layer, G_CARDIO, 120, 92, 14, hc);
     } else {
-        draw_txt_c(layer, &kenney9, lv_color_hex(0x8A94A8), 120, 118,
+        draw_txt_c(layer, &kenney12, lv_color_hex(0x8A94A8), 120, 118,
                    "BPM");
     }
     /* satellites: zone left, resting right */
@@ -2196,12 +2346,12 @@ static void cardio_draw(lv_event_t *e)
     cardio_zone(bpm, z, &zn);
     hex_stroke(layer, 52, 78, 21, C_ACCENT, 1);
     draw_txt_c(layer, &kenney16, C_ACCENT, 52, 68, z);
-    draw_txt_c(layer, &kenney9, lv_color_hex(0x5A6478), 52, 86, zn);
+    draw_txt_c(layer, &kenney12, lv_color_hex(0x5A6478), 52, 86, zn);
     hex_stroke(layer, 188, 78, 21, lv_color_hex(0xB06CF0), 1);
     char rb[8];
     lv_snprintf(rb, sizeof rb, resting_bpm ? "%d" : "--", resting_bpm);
     draw_txt_c(layer, &kenney16, lv_color_hex(0xB06CF0), 188, 68, rb);
-    draw_txt_c(layer, &kenney9, lv_color_hex(0x5A6478), 188, 86, "REST");
+    draw_txt_c(layer, &kenney12, lv_color_hex(0x5A6478), 188, 86, "REST");
     /* grid behind the trace, the concept's ECG panel */
     lv_draw_line_dsc_t ln;
     lv_draw_line_dsc_init(&ln);
@@ -2290,7 +2440,8 @@ static void diag_fill(void)
         "BLE st%d conn%d enc%d\n"
         " sec%d encst%d disc%d\n"
         " ancs%d sub%d cts%d time%d\n"
-        "LOOP %d/s bat%d%% r%d fw%d",
+        "LOOP %d/s bat%d%% r%d fw%d\n"
+        "VOIDOS " VOIDOS_VERSION,
         sensors_hrs_ok(), sensors_hrs_raw(), sensors_hrs_als(), sensors_hrs_ac(),
         sensors_hrs_snr10() / 10, sensors_hrs_snr10() % 10,
         sensors_hrs_fs10() / 10, sensors_hrs_fs10() % 10,
