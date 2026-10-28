@@ -184,6 +184,8 @@ int sensors_hrs_raw(void) { return 0; }
 int sensors_hrs_ac(void) { return 0; }
 int sensors_hrs_beats(void) { return 0; }
 int sensors_hrs_ibi(void) { return 0; }
+int sensors_bma_engine(void) { return 0; }
+int hal_clock_synced(void) { return 0; }
 void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s)
 {
     (void)y; (void)mo; (void)d; (void)dow; (void)h; (void)mi; (void)s;

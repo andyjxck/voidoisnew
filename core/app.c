@@ -1279,7 +1279,7 @@ static void render_face_digital(app_t *app)
 
     /* BPM: halo centred on the heart, and the heart itself brightens
        with the beat */
-    char bpm_str[12];
+    char bpm_str[16];
     snprintf(bpm_str, sizeof bpm_str, "%d BPM", bpm);
     int bw = 0, bh = 0;
     hal_face_text_size(bpm_str, 16, &bw, &bh);
@@ -1382,7 +1382,7 @@ static void render_face_analog(app_t *app)
 
     int bpm = bpm_pre;
 
-    char bpm_str[12];
+    char bpm_str[16];
     snprintf(bpm_str, sizeof bpm_str, "%d BPM", bpm);
     int bpm_tw = 0, bpm_th = 0;
     hal_face_text_size(bpm_str, 13, &bpm_tw, &bpm_th);

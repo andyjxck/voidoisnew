@@ -1,10 +1,10 @@
 CC ?= clang
 SDL_CFLAGS := $(shell sdl2-config --cflags)
 SDL_LIBS := $(shell sdl2-config --libs)
-TTF_PREFIX := $(shell brew --prefix sdl2_ttf)
+TTF_PREFIX := $(shell brew --prefix sdl2_ttf 2>/dev/null || echo /usr)
 TTF_CFLAGS := -I$(TTF_PREFIX)/include
 TTF_LIBS := -L$(TTF_PREFIX)/lib -lSDL2_ttf
-IMG_PREFIX := $(shell brew --prefix sdl2_image)
+IMG_PREFIX := $(shell brew --prefix sdl2_image 2>/dev/null || echo /usr)
 IMG_CFLAGS := -I$(IMG_PREFIX)/include
 IMG_LIBS := -L$(IMG_PREFIX)/lib -lSDL2_image
 CFLAGS := -std=c11 -Wall -Wextra -Werror -Iinclude
@@ -32,14 +32,27 @@ build/test_ble_dfu: tests/dfu/test_ble_dfu.c firmware/nimble_port/src/ble_dfu.c
 	mkdir -p build
 	$(CC) $(CFLAGS) -Itests/dfu/stubs -Ifirmware tests/dfu/test_ble_dfu.c -o $@
 
-test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu
+# HR pipeline: the real firmware/sensors.c HRS3300 code on synthetic PPG
+build/test_hr: tests/hr/test_hr.c firmware/sensors.c
+	mkdir -p build
+	$(CC) -std=gnu11 -O1 -w -Iinclude -Icore -Ifirmware tests/hr/test_hr.c -o $@ -lm
+
+test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr
 	./build/test_app
 	SDL_VIDEODRIVER=dummy ./build/test_screenshot
 	SDL_VIDEODRIVER=dummy ./build/test_input
 	./build/test_ble_dfu
+	./build/test_hr
+
+# renders every watch screen and fails on small/overlapping tap targets
+# or clipped text (writes PPMs + taps.txt to build/uisnap)
+uicheck:
+	$(MAKE) -C tests/uisnap
+	mkdir -p build/uisnap
+	./tests/uisnap/snap build/uisnap
 
 clean:
-	rm -f build/voidos-sim build/test_app build/test_screenshot build/test_input
+	rm -rf build/voidos-sim build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/uisnap
 	-rmdir build 2>/dev/null || true
 
-.PHONY: all test clean
+.PHONY: all test uicheck clean
