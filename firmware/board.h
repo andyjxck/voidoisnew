@@ -4,7 +4,9 @@
 
 #include <stdint.h>
 
+#ifndef REG32
 #define REG32(addr) (*(volatile uint32_t *)(addr))
+#endif
 #define BIT(p) (1u << (p))
 
 /* GPIO P0 */

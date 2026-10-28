@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "board.h"
+#include "voidos/hal.h"
 
 static uint8_t fx_buf[264] __attribute__((aligned(4)));
 
@@ -80,6 +81,20 @@ void spi_flash_init(void)
     SPIM0_ENABLE = 0;
     SPIM0_PSEL_MISO = PIN_MISO;
     SPIM0_ENABLE = 7;
+    /* release from deep power-down (0xAB + 3 dummy bytes), as InfiniTime's
+       SpiNorFlash::Wakeup does at every boot: InfiniTime puts the XT25F32B
+       to sleep (0xB9) when its screen goes off, and a reset straight from
+       there into this firmware left every read returning junk (settings
+       lost, DFU writes silently failing) */
+    {
+        static const uint8_t rdp[4] = {0xAB, 0, 0, 0};
+        uint8_t id;
+        flash_sel(1);
+        flash_xfer(rdp, 0, 4);
+        flash_xfer(0, &id, 1);
+        flash_sel(0);
+        hal_delay_ms(1);               /* tRES1 is a few us */
+    }
     (void)flash_status();
 }
 

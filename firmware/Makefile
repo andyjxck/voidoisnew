@@ -100,9 +100,10 @@ voidos-app.out: $(OBJS) link.ld
 $(BIN): voidos-app.out
 	$(OBJCOPY) -O binary $< $@
 
-# MCUBoot image: 32-byte header, app slot 475136 bytes at 0x8000
+# MCUBoot image: 32-byte header, app slot 475136 bytes at 0x8000.
+# Same imgtool arguments as InfiniTime's build (--align 1).
 $(IMG): $(BIN)
-	$(TOOLS)/imgtool create --align 4 --version $(VERSION) --header-size 32 \
+	$(TOOLS)/imgtool create --align 1 --version $(VERSION) --header-size 32 \
 	    --slot-size 475136 --pad-header $< $@
 
 $(ZIP): $(IMG)

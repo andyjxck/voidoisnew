@@ -194,19 +194,24 @@ void hal_clock_date(int *y, int *mo, int *d, int *dow)
     if (dow) *dow = ww;
 }
 
-/* vibration motor, GPIO P0.16 */
+/* vibration motor, GPIO P0.16. ACTIVE LOW: the pin drives a P-channel
+   switch, so pin high = motor off, pin low = motor on. InfiniTime
+   (MotorController) sets the pin high at init and clears it to run.
+   1.6.x had this inverted: the first hal_motor() call (a notification,
+   timer or water-lock exit) drove the pin low and every "off" after
+   that kept it low, which is the runaway vibration 1.6.1 chased. */
+static void motor_init(void)
+{
+    GPIO_OUTSET = 1u << PIN_VIBRA;        /* off before it becomes an output */
+    GPIO_DIRSET = 1u << PIN_VIBRA;
+}
+
 void hal_motor(int on)
 {
-    static int configured;
-    if (!configured) {
-        GPIO_DIRSET = 1u << PIN_VIBRA;
-        GPIO_OUTCLR = 1u << PIN_VIBRA;
-        configured = 1;
-    }
     if (on)
-        GPIO_OUTSET = 1u << PIN_VIBRA;
-    else
         GPIO_OUTCLR = 1u << PIN_VIBRA;
+    else
+        GPIO_OUTSET = 1u << PIN_VIBRA;
 }
 
 /* battery voltage on P0.31 (AIN7) through the 2:1 divider */
@@ -230,18 +235,19 @@ int hal_battery_raw(void) { return battery_raw; }
 
 int hal_battery_pct(void)
 {
-    /* piecewise lipo curve (voltage -> %), matches the usual
-       PineTime discharge profile closely enough for a gauge */
+    /* InfiniTime's discharge curve (BatteryController.cpp) */
     static const uint16_t curve[][2] = {
-        {3500, 0},  {3620, 5},  {3690, 10}, {3710, 15}, {3730, 20},
-        {3770, 30}, {3800, 40}, {3820, 50}, {3870, 60}, {3920, 70},
-        {3980, 80}, {4060, 90}, {4150, 100}
+        {3500, 0}, {3616, 3}, {3723, 22}, {3776, 48}, {3979, 79}, {4180, 100}
     };
     static int16_t result[4];
     SAADC_ENABLE = 1;
     SAADC_CH0_PSELP = 8;            /* PSEL is AIN#+1: 8 = AIN7 = P0.31 */
     SAADC_CH0_PSELN = 0;
-    SAADC_CH0_CONF = (3 << 16);     /* 10us acq, 1/6 gain, internal ref */
+    /* InfiniTime's channel config: gain 1/4, internal 0.6 V ref (2.4 V
+       full scale), 40 us acquisition. The battery sits behind a high-
+       value 2:1 divider; 1.6.2's 15 us acquisition is too short for
+       that source impedance and reads low. */
+    SAADC_CH0_CONF = (2u << 8) | (5u << 16);
     SAADC_RESOL = 2;                /* 12 bit */
     SAADC_RES_PTR = (uint32_t)result;
     SAADC_RES_MAX = 1;
@@ -264,11 +270,11 @@ int hal_battery_pct(void)
     int raw = result[0];
     battery_raw = raw;
     if (raw < 0) raw = 0;
-    /* raw/4096 * 3.6V input range * 2 (the 2:1 battery divider) */
-    uint32_t mv = (uint32_t)raw * 7200u / 4096u;
+    /* raw/4096 * 2.4 V input range * 2 (the 2:1 battery divider) */
+    uint32_t mv = (uint32_t)raw * 4800u / 4096u;
     if (mv <= curve[0][0])
         return 0;
-    for (int i = 1; i < 13; i++) {
+    for (unsigned i = 1; i < sizeof curve / sizeof curve[0]; i++) {
         if (mv <= curve[i][0]) {
             uint32_t dv = curve[i][0] - curve[i - 1][0];
             uint32_t dp = curve[i][1] - curve[i - 1][1];
@@ -344,7 +350,10 @@ static void twi_init(void)
     GPIO_PIN_CNF(PIN_SCL) = (3u << 2) | (6u << 8);
     TWIM1_PSEL_SCL = PIN_SCL;
     TWIM1_PSEL_SDA = PIN_SDA;
-    TWIM1_FREQ = 0x06400000; /* 400 kHz */
+    /* 390 kHz, not 400: nRF52832 errata 219 (TWIM tLOW too short at the
+       400 kHz setting). Same value InfiniTime uses
+       (MaxTwiFrequencyWithoutHardwareBug = 0x06200000). */
+    TWIM1_FREQ = 0x06200000;
     TWIM1_ENABLE = 6;
 }
 
@@ -379,7 +388,7 @@ static void twi_recover(void)
     GPIO_PIN_CNF(PIN_SCL) = (3u << 2) | (6u << 8);
     TWIM1_PSEL_SCL = PIN_SCL;
     TWIM1_PSEL_SDA = PIN_SDA;
-    TWIM1_FREQ = 0x06400000;
+    TWIM1_FREQ = 0x06200000;   /* errata 219, see twi_init */
     TWIM1_ENABLE = 6;
 }
 
@@ -488,6 +497,22 @@ static int touch_was_down;
 static int last_gesture;
 static int last_gesture_x;
 
+/* the two config writes InfiniTime's Cst816s::Init makes after every
+   reset pulse. A reset puts these back to the chip defaults, so they
+   are re-sent on wake too (1.6.2 only sent them at boot, so after the
+   first screen-off taps no longer pulsed INT and touch fell back to
+   the slow 100 ms safety poll). */
+static void touch_config(void)
+{
+    /* motion mask: continuous left/right + double-click (as InfiniTime) */
+    i2c_write_reg(CST816_ADDR, 0xEC, 0x05);
+    /* IRQ control: pulse INT on touch, on touch-state change, on gesture.
+       Without this the controller stays silent for plain taps/drags. */
+    i2c_write_reg(CST816_ADDR, 0xFA, 0x70);
+    /* disable the 5s no-gesture auto-reset (it kills mid-swipe touches) */
+    i2c_write_reg(CST816_ADDR, 0xFB, 0x00);
+}
+
 static void touch_init(void)
 {
     imark(0, 0xFFFF);          /* white:  entered touch_init */
@@ -503,30 +528,26 @@ static void touch_init(void)
     i2c_read_reg(CST816_ADDR, 0x15, &dummy, 1);
     hal_delay_ms(5);
     imark(2, 0xFD20);          /* orange: wake read done */
-    /* explicit exit-sleep in case a previous firmware left it asleep */
-    i2c_write_reg(CST816_ADDR, 0xA5, 0x00);
+    /* InfiniTime does a second dummy read of the chip ID here */
+    i2c_read_reg(CST816_ADDR, 0xA7, &dummy, 1);
     hal_delay_ms(5);
-    imark(3, 0xFFE0);          /* yellow: sleep-exit write done */
-    /* bus scan: which I2C devices actually ACK (diagnostic). One green
-       stripe per 8 probed addresses — the count of bars shows where a
-       probe kills the bus, and the stage register holds the address. */
-    for (int a = 0x08; a < 0x78; a++) {
-        if ((a & 7) == 0)
-            imark(4 + (a >> 3), 0x07E0);
-        nimble_stage(a);
-        uint8_t b;
-        if (i2c_read_reg(a, 0x00, &b, 1) && touch_diag.scan_count < 8)
-            touch_diag.scan[touch_diag.scan_count++] = (uint8_t)a;
+    imark(3, 0xFFE0);          /* yellow: wake reads done */
+    /* which of PineTime's known I2C parts ACK (diagnostic). 1.6.2 probed
+       every address 0x08..0x77 here, poking unknown parts on the bus;
+       only the four that can be fitted are probed now: CST816S 0x15,
+       BMA42x 0x18/0x19, HRS3300 0x44. */
+    {
+        static const uint8_t known[] = {0x15, 0x18, 0x19, 0x44};
+        for (unsigned i = 0; i < sizeof known; i++) {
+            uint8_t b;
+            nimble_stage(known[i]);
+            if (i2c_read_reg(known[i], 0x00, &b, 1) && touch_diag.scan_count < 8)
+                touch_diag.scan[touch_diag.scan_count++] = known[i];
+        }
     }
     nimble_stage(79);
-    imark(4, 0x07E0);          /* green:  bus scan done */
-    /* motion mask: continuous left/right + double-click (as InfiniTime) */
-    i2c_write_reg(CST816_ADDR, 0xEC, 0x05);
-    /* IRQ control: pulse INT on touch, on touch-state change, on gesture.
-       Without this the controller stays silent for plain taps/drags. */
-    i2c_write_reg(CST816_ADDR, 0xFA, 0x70);
-    /* disable the 5s no-gesture auto-reset (it kills mid-swipe touches) */
-    i2c_write_reg(CST816_ADDR, 0xFB, 0x00);
+    imark(4, 0x07E0);          /* green:  bus probe done */
+    touch_config();
     imark(5, 0x07FF);          /* cyan:   config writes done */
     /* input, pull-up, SENSE low; with DETECTMODE=LDETECT the LATCH bit
        captures the controller's short INT pulse until we clear it */
@@ -625,21 +646,29 @@ int touch_sample(int *x, int *y)
 
 /* CST816S gesture register (0x01): 1=up 2=down 3=left 4=right
    5=single-tap 0x0B=double-tap 0x0C=long-press. Returns and clears the latest ID. */
-/* CST816S low-power mode while the display is off; INT still fires on
-   a touch so the wake path keeps working */
+/* CST816S deep sleep while the display is off (InfiniTime Cst816s::
+   Sleep: reset pulse, then 0xA5 = 0x03). In deep sleep the chip does
+   not report touches; the wake paths are the button and raise-to-wake.
+   Waking needs a reset pulse and the full config again (Cst816s::
+   Wakeup calls Init). */
 void touch_sleep(int on)
 {
     if (!touch_ok)
         return;
-    if (on)
+    GPIO_OUTCLR = BIT(PIN_TP_RESET);
+    hal_delay_ms(5);
+    GPIO_OUTSET = BIT(PIN_TP_RESET);
+    hal_delay_ms(50);
+    if (on) {
         i2c_write_reg(CST816_ADDR, 0xA5, 0x03);
-    else {
-        /* only a reset pulse wakes it: toggle the TP reset line */
-        GPIO_OUTCLR = BIT(PIN_TP_RESET);
+    } else {
+        uint8_t dummy;
+        i2c_read_reg(CST816_ADDR, 0x15, &dummy, 1);
         hal_delay_ms(5);
-        GPIO_OUTSET = BIT(PIN_TP_RESET);
-        hal_delay_ms(50);
-        i2c_write_reg(CST816_ADDR, 0xA5, 0x00);
+        i2c_read_reg(CST816_ADDR, 0xA7, &dummy, 1);
+        hal_delay_ms(5);
+        touch_config();
+        GPIO_LATCH = BIT(PIN_TP_INT);
     }
 }
 
@@ -669,6 +698,7 @@ int hal_init(void)
     GPIO_OUTSET = BIT(PIN_BL_L) | BIT(PIN_BL_M) | BIT(PIN_BL_H);
     time_init();
     button_init();
+    motor_init();
     nimble_stage(80);
     display_init();
     twi_init();
