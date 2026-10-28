@@ -1,6 +1,7 @@
 # VoidOS PineTime firmware — bare-metal nRF52832, MCUBoot app slot
 .DEFAULT_GOAL := all
-TOOLCHAIN ?= $(HOME)/toolchains/arm-gcc/bin
+# ~/toolchains/arm-gcc when present, else whatever arm-none-eabi-gcc is on PATH
+TOOLCHAIN ?= $(if $(wildcard $(HOME)/toolchains/arm-gcc/bin),$(HOME)/toolchains/arm-gcc/bin,$(patsubst %/,%,$(dir $(shell command -v arm-none-eabi-gcc))))
 TOOLS     ?= $(HOME)/.voidos-tools/bin
 CROSS     ?= $(TOOLCHAIN)/arm-none-eabi-
 CC      = $(CROSS)gcc
@@ -11,11 +12,11 @@ PYTHON  = $(TOOLS)/python3
 ARCH    = -mcpu=cortex-m4 -mthumb -mabi=aapcs -mfloat-abi=hard -mfpu=fpv4-sp-d16
 CFLAGS  = $(ARCH) -std=c11 -Os -g -ffunction-sections -fdata-sections \
           -Wall -Wextra -Werror -I../include -I../core -I. \
-          -DVOIDOS_DEVICE -DVOIDOS_DEBUG_TOUCH
+          -DVOIDOS_DEVICE -DVOIDOS_DEBUG_TOUCH -DVOIDOS_VERSION=\"$(VERSION)\"
 LDFLAGS = $(ARCH) -T link.ld -Wl,--gc-sections -Wl,-Map=voidos-app.map \
           -specs=nano.specs -Wl,--no-warn-rwx-segments
 
-VERSION ?= 1.0.0
+VERSION ?= 2.0.0
 BIN      = voidos-app.bin
 IMG      = voidos-app-image.bin
 ZIP      = voidos-dfu-$(VERSION).zip
