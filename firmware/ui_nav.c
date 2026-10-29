@@ -2553,6 +2553,8 @@ int hal_clock_synced(void), hal_boot_confirmed(void);
 int ancs_cts_state(void), ancs_sub_fail(void), sensors_hrs_als(void);
 void ble_link_diag(int *conns, int *sec_rc, int *enc_status,
                    int *disc_reason, int *encrypted);
+void ble_bond_diag(int *bonds, int *repairs);
+int ams_state(void), ancs_seq_phase(void);
 
 static lv_obj_t *diag_lbl;
 static unsigned diag_loops, diag_lps;
@@ -2568,7 +2570,9 @@ static void diag_fill(void)
 {
     char b[400];
     int conns, sec, enc, disc, encd;
+    int bonds, repairs;
     ble_link_diag(&conns, &sec, &enc, &disc, &encd);
+    ble_bond_diag(&bonds, &repairs);
     lv_snprintf(b, sizeof b,
         "HRS ok%d raw%d als%d ac%d\n"
         " snr%d.%d fs%d.%d pk%d bpm%d\n"
@@ -2577,6 +2581,7 @@ static void diag_fill(void)
         "BLE st%d conn%d enc%d\n"
         " sec%d encst%d disc%d\n"
         " ancs%d sub%d cts%d time%d\n"
+        " ams%d ph%d bond%d rp%d\n"
         "LOOP %d/s bat%d%% r%d fw%d\n"
         "VOIDOS " VOIDOS_VERSION,
         sensors_hrs_ok(), sensors_hrs_raw(), sensors_hrs_als(), sensors_hrs_ac(),
@@ -2589,6 +2594,7 @@ static void diag_fill(void)
         sensors_retries(),
         ble_status(), conns, encd, sec, enc, disc,
         ancs_state(), ancs_sub_fail(), ancs_cts_state(), hal_clock_synced(),
+        ams_state(), ancs_seq_phase(), bonds, repairs,
         (int)diag_lps, hal_battery_pct(), hal_battery_raw(),
         hal_boot_confirmed());
     if (diag_lbl)

@@ -33,6 +33,10 @@ build/test_ble_dfu: tests/dfu/test_ble_dfu.c firmware/nimble_port/src/ble_dfu.c
 	$(CC) $(CFLAGS) -Itests/dfu/stubs -Ifirmware tests/dfu/test_ble_dfu.c -o $@
 
 # HR pipeline: the real firmware/sensors.c HRS3300 code on synthetic PPG
+build/test_ble_units: tests/ble/test_ble_units.c firmware/nimble_port/src/gatt_owner.h firmware/nimble_port/src/ams_parse.h firmware/nimble_port/src/bondblob.c firmware/nimble_port/src/bondblob.h
+	mkdir -p build
+	$(CC) -std=gnu11 -O1 -Wall -Wextra -Ifirmware tests/ble/test_ble_units.c -o $@
+
 build/test_hr: tests/hr/test_hr.c firmware/sensors.c
 	mkdir -p build
 	$(CC) -std=gnu11 -O1 -w -Iinclude -Icore -Ifirmware tests/hr/test_hr.c -o $@ -lm
@@ -50,12 +54,13 @@ hrcompare: build/test_hr build/test_hr_old
 	./build/test_hr_old | grep '^\['
 	./build/test_hr | grep '^\['
 
-test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr
+test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/test_ble_units
 	./build/test_app
 	SDL_VIDEODRIVER=dummy ./build/test_screenshot
 	SDL_VIDEODRIVER=dummy ./build/test_input
 	./build/test_ble_dfu
 	./build/test_hr
+	./build/test_ble_units
 
 # renders every watch screen and fails on small/overlapping tap targets
 # or clipped text (writes PPMs + taps.txt to build/uisnap)
@@ -69,7 +74,7 @@ heapcheck:
 	./tests/uisnap/heapcheck.sh
 
 clean:
-	rm -rf build/voidos-sim build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/test_hr_old build/sensors_2_1.c build/uisnap
+	rm -rf build/voidos-sim build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/test_ble_units build/test_hr_old build/sensors_2_1.c build/uisnap
 	-rmdir build 2>/dev/null || true
 
 .PHONY: all test uicheck clean hrcompare heapcheck

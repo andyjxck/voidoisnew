@@ -60,6 +60,9 @@ void spi_flash_write(uint32_t a, const uint8_t *b, unsigned n) { (void)a; (void)
 void spi_flash_sector_erase(uint32_t a) { (void)a; }
 int ancs_cts_state(void) { return 0; }
 int ancs_sub_fail(void) { return 0; }
+void ble_bond_diag(int *a, int *b) { *a = 1; *b = 0; }
+int ams_state(void) { return 7; }
+int ancs_seq_phase(void) { return 4; }
 int ancs_ready(void) { return 1; }
 int ancs_state(void) { return 3; }
 static int snap_notif_stress;   /* 4 notifications, every field full */

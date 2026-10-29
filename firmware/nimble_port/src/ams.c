@@ -15,6 +15,7 @@
 #include "host/ble_gatt.h"
 #include "../../phone.h"
 #include "gatt_owner.h"
+#include "ams_parse.h"
 
 extern uint32_t hal_millis(void);
 int ancs_client_idle(void);
@@ -225,20 +226,6 @@ void ams_tick(void)
     if ((int32_t)(hal_millis() - start_at) < 0 || !ancs_client_idle())
         return;
     ams_start();
-}
-
-/* PlaybackInfo value "state,rate,elapsed" (pure, host-tested) */
-int ams_parse_playback(const char *v, int *playing, int *elapsed_s)
-{
-    if (!v || *v < '0' || *v > '9')
-        return -1;
-    int state = atoi(v);
-    /* 0 paused, 1 playing, 2 rewinding, 3 fast-forwarding */
-    *playing = state == 1 || state == 3;
-    const char *e = strchr(v, ',');
-    if (e) e = strchr(e + 1, ',');
-    *elapsed_s = e ? atoi(e + 1) : -1;
-    return 0;
 }
 
 /* Entity Update: [entity, attribute, flags, utf-8 value...] */
