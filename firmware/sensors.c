@@ -13,6 +13,7 @@
 
 int i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *dst, unsigned n);
 int i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t val);
+int i2c_write_regs(uint8_t addr, uint8_t reg, const uint8_t *src, unsigned n);
 uint32_t hal_millis_raw(void);
 
 #define BMA_ADDR 0x18
@@ -54,8 +55,6 @@ static int bma_feat_xfer(uint8_t *buf, unsigned len, int write)
     }
     return 1;
 }
-
-int i2c_write_regs(uint8_t addr, uint8_t reg, const uint8_t *src, unsigned n);
 
 static void bma_init(void)
 {

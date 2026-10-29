@@ -15,3 +15,4 @@ firmware/nimble_port/include/syscfg/syscfg.h
 
 # macOS
 .DS_Store
+*.d

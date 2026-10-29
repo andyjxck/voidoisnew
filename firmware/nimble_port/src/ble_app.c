@@ -13,6 +13,14 @@
 #include "controller/ble_phy.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "host/ble_store.h"
+#include "host/util/util.h"
+#if __has_include("gen/version.h")
+#include "gen/version.h"
+#endif
+#ifndef VOIDOS_VERSION
+#define VOIDOS_VERSION "dev"
+#endif
 
 extern void nrf52_clock_hfxo_request(void);
 extern void npl_callout_tick(void);
@@ -56,7 +64,10 @@ int phone_svcs_init(void);
 void phone_music_reset(void);
 static int ble_compat;          /* advertise as "InfiniTime" for InfiniLink */
 uint16_t ble_conn_handle(void) { return conn_handle; }
-int ble_store_ram_init(void);
+void ble_bond_store_init(uint16_t sig);
+void ble_bond_store_poll(uint32_t now, int busy);
+int ble_bond_count(void);
+static int d_repeat_pairs;      /* diag: re-pairs accepted */
 extern uint32_t hal_millis(void);
 
 static int gap_cb(struct ble_gap_event *ev, void *arg)
@@ -100,6 +111,18 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
         if (!ams_on_notify(ev->notify_rx.attr_handle, ev->notify_rx.om))
             ancs_on_notify(ev->notify_rx.attr_handle, ev->notify_rx.om);
         break;
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        /* The iPhone wants to pair again while we still hold a key for
+           it (it was forgotten on the phone, or its key no longer
+           matches). NimBLE's default answer is to ignore the request,
+           which left the link unencrypted: drop the old bond and let
+           the new pairing go ahead. */
+        struct ble_gap_conn_desc d;
+        if (ble_gap_conn_find(ev->repeat_pairing.conn_handle, &d) == 0)
+            ble_store_util_delete_peer(&d.peer_id_addr);
+        d_repeat_pairs++;
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
     case BLE_GAP_EVENT_ENC_CHANGE:
         d_enc_status = ev->enc_change.status;
         if (ev->enc_change.status == 0) {
@@ -226,7 +249,15 @@ int ble_init(void)
                                  BLE_HS_KEY_DIST_ID_KEY;
     ble_hs_cfg.sm_their_key_dist = BLE_HS_KEY_DIST_ENC_KEY |
                                    BLE_HS_KEY_DIST_ID_KEY;
-    ble_store_ram_init();            /* bonds live for the session */
+    /* bonds in RAM, mirrored to external flash (0x3F3000-0x3F4FFF) so
+       they survive a reboot or a flash. The signature ties saved CCCDs
+       to this firmware's GATT table. */
+    {
+        uint16_t sig = 0x5644;
+        for (const char *v = VOIDOS_VERSION; *v; v++)
+            sig = (uint16_t)(sig * 31u + (uint8_t)*v);
+        ble_bond_store_init(sig);
+    }
     ble_up = 1;
     return 1;
 }
@@ -289,6 +320,15 @@ void ble_poll(void)
     }
     ancs_tick();
     ams_tick();
+    /* write changed bonds to flash, never mid-pairing */
+    {
+        struct ble_gap_conn_desc bd;
+        int pairing = ble_connected() &&
+                      ble_gap_conn_find(conn_handle, &bd) == 0 &&
+                      !bd.sec_state.encrypted && sec_attempts > 0 &&
+                      sec_pending_at;
+        ble_bond_store_poll(hal_millis(), pairing);
+    }
     /* advertising watchdog: any failed/interrupted adv start (disconnect
        races, failed pairing) would otherwise leave the watch invisible */
     {
@@ -371,6 +411,13 @@ int ble_status(void)
 }
 
 /* link diagnostics for the on-watch DIAG screen */
+/* DIAG: bonds held, re-pairs accepted */
+void ble_bond_diag(int *bonds, int *repairs)
+{
+    if (bonds)   *bonds = ble_up ? ble_bond_count() : 0;
+    if (repairs) *repairs = d_repeat_pairs;
+}
+
 void ble_link_diag(int *conns, int *sec_rc, int *enc_status,
                    int *disc_reason, int *encrypted)
 {

@@ -15,6 +15,7 @@
 #include "host/ble_gatt.h"
 #include "host/ble_gap.h"
 #include "host/ble_uuid.h"
+#include "gatt_owner.h"
 
 uint32_t hal_millis(void);
 
@@ -53,15 +54,15 @@ static int state;
 static uint16_t a_conn;
 static uint16_t svc_start, svc_end;
 static uint16_t h_ns_val, h_ns_cccd, h_ds_val, h_ds_cccd, h_cp_val;
-static uint32_t disc_retry_at;
-static uint32_t ancs_start_at;      /* begin discovery once CTS/AMS allow */
+static struct gatt_spans spans;     /* every char found in the service */
+static uint32_t ancs_start_at;      /* retry discovery at (0 = no retry) */
 static uint8_t ancs_tries;          /* discovery attempts this link */
 static uint8_t link_enc;            /* this link is encrypted */
 static int16_t ancs_last_err;       /* diag: last GATT error, any step */
 static int cts_state;               /* 0 idle 1 disc 2 read 3 synced */
-static uint32_t cts_pending_at;
-static int sub_inflight;            /* a CCCD write awaits its callback */
 static uint32_t cts_ok_at;          /* when the clock last synced */
+static uint32_t cts_retry_at;
+static uint8_t seq_phase, seq_started;  /* see link sequencer below */
 
 /* Data Source responses can fragment across notifications; accumulate */
 static uint8_t ds_buf[320];
@@ -120,34 +121,118 @@ static void slot_drop(uint32_t uid)
     }
 }
 
+/* ---- one GATT client procedure at a time -------------------------------
+   NimBLE does not queue ATT requests: a second request sent while one
+   is outstanding is a protocol violation, the phone answers only one,
+   and the other procedure times out after 30 s, at which point NimBLE
+   drops the link itself (DIAG "disc534"). CTS, AMS, ANCS and the
+   Control Point all take this lock for the whole chain they run and
+   give it back from their final callback. */
+enum { GC_FREE, GC_CTS, GC_AMS, GC_ANCS, GC_CP, GC_AMSCMD };
+static uint8_t gc_owner;
+static uint32_t gc_since;
+int gc_take(int who)
+{
+    if (gc_owner != GC_FREE || !a_conn)
+        return 0;
+    gc_owner = (uint8_t)who;
+    gc_since = hal_millis();
+    return 1;
+}
+void gc_give(int who)
+{
+    if (gc_owner == who)
+        gc_owner = GC_FREE;
+}
+int gc_held(void) { return gc_owner; }
+
+/* Control Point writes: queued, sent one at a time with a callback */
+#define CPQ_N 4
+static struct { uint8_t len; uint8_t b[20]; } cpq[CPQ_N];
+static uint8_t cpq_n;
+static void cp_pump(void);
+static int cp_done(uint16_t conn, const struct ble_gatt_error *err,
+                   struct ble_gatt_attr *attr, void *arg)
+{
+    (void)conn; (void)attr; (void)arg;
+    if (err->status)
+        ancs_last_err = err->status;
+    gc_give(GC_CP);
+    return 0;
+}
 static void cp_write(const uint8_t *cmd, int len)
 {
-    if (h_cp_val)
-        ble_gattc_write_flat(a_conn, h_cp_val, cmd, len, NULL, NULL);
+    if (!h_cp_val || len > 20 || cpq_n >= CPQ_N)
+        return;
+    cpq[cpq_n].len = (uint8_t)len;
+    memcpy(cpq[cpq_n].b, cmd, len);
+    cpq_n++;
+    cp_pump();
+}
+static void cp_pump(void)
+{
+    if (!cpq_n || !h_cp_val || !gc_take(GC_CP))
+        return;
+    if (ble_gattc_write_flat(a_conn, h_cp_val, cpq[0].b, cpq[0].len,
+                             cp_done, NULL))
+        gc_give(GC_CP);
+    memmove(cpq, cpq + 1, sizeof cpq[0] * (CPQ_N - 1));
+    cpq_n--;
 }
 
-/* ask the phone for a notification's attributes */
-static void fetch_attrs(uint32_t uid)
+/* attribute fetches: one outstanding (the Data Source reply is
+   reassembled into one buffer), the rest wait their turn */
+#define FQ_N 6
+static uint32_t fq[FQ_N];
+static uint8_t fq_n;
+static uint32_t fetch_at;           /* current fetch sent at, 0 = none */
+
+static void fetch_send(uint32_t uid)
 {
-    uint8_t req[5 + 1 + 3 + 1 + 3 + 1 + 1 + 1 + 1];
+    /* ANCS: AppIdentifier has no length; Title/Subtitle/Message must
+       carry a max length. 2.2.0 asked for Subtitle with no length, so
+       the request was malformed from that byte on. */
+    uint8_t req[14];
     int n = 0;
     req[n++] = 0x00;                 /* GetNotificationAttributes */
     req[n++] = uid & 0xFF;
     req[n++] = (uid >> 8) & 0xFF;
     req[n++] = (uid >> 16) & 0xFF;
     req[n++] = (uid >> 24) & 0xFF;
-    req[n++] = 0x00;                 /* AppIdentifier, full len */
-    req[n++] = 0x01;                 /* Title */
+    req[n++] = 0x00;                 /* AppIdentifier */
+    req[n++] = 0x01;                 /* Title, max 48 */
     req[n++] = 48; req[n++] = 0x00;
-    req[n++] = 0x02;                 /* Subtitle */
-    req[n++] = 0x03;                 /* Message */
+    req[n++] = 0x03;                 /* Message, max 95 */
     req[n++] = 95; req[n++] = 0x00;
-    req[n++] = 0x05;                 /* Date */
     req[n++] = 0x06;                 /* PositiveActionLabel */
     req[n++] = 0x07;                 /* NegativeActionLabel */
     pending_uid = uid;
     ds_len = 0;
+    fetch_at = hal_millis() | 1;
     cp_write(req, n);
+}
+
+static void fetch_pump(void)
+{
+    if (fetch_at && hal_millis() - fetch_at < 3000)
+        return;                      /* reply still coming */
+    fetch_at = 0;
+    if (!fq_n || state != ST_LIVE)
+        return;
+    uint32_t uid = fq[0];
+    memmove(fq, fq + 1, sizeof fq[0] * (FQ_N - 1));
+    fq_n--;
+    fetch_send(uid);
+}
+
+static void fetch_attrs(uint32_t uid)
+{
+    for (int i = 0; i < fq_n; i++)
+        if (fq[i] == uid)
+            return;
+    if (fq_n < FQ_N)
+        fq[fq_n++] = uid;
+    fetch_pump();
 }
 
 void ancs_dismiss(uint32_t uid)
@@ -216,6 +301,8 @@ static void on_ds(const uint8_t *d, int len)
     if (complete) {
         ds_len = 0;
         notif_dirty = 1;
+        fetch_at = 0;
+        fetch_pump();
     }
 }
 
@@ -238,7 +325,8 @@ static void on_ns(const uint8_t *d, int len)
         n->rx_ms = hal_millis();
         n->app[0] = n->title[0] = n->msg[0] = 0;
         n->has_pos = n->has_neg = 0;
-        new_notif = 1;
+        if (!(flags & 0x04))         /* PreExisting: shown, no buzz */
+            new_notif = 1;
     }
     fetch_attrs(uid);
 }
@@ -258,82 +346,83 @@ void ancs_on_notify(uint16_t attr_handle, struct os_mbuf *om)
         on_ds(d, len);
 }
 
-/* ---- discovery state machine --------------------------------------------- */
+/* ---- discovery state machine ---------------------------------------------
+   svc -> chars -> descriptors -> subscribe DS -> subscribe NS -> live,
+   one chain holding the GATT lock. DS goes first so the burst of
+   existing notifications iOS sends right after the NS subscribe can
+   already be fetched. */
 
 static int sub_fail;                /* diag: last CCCD write error */
-static int sub_done(uint16_t conn, const struct ble_gatt_error *err,
-                    struct ble_gatt_attr *attr, void *arg);
+int ancs_sub_fail(void) { return sub_fail; }
 
-static int ds_sub_done(uint16_t conn, const struct ble_gatt_error *err,
+static void disc_failed(int status)
+{
+    ancs_last_err = (int16_t)status;
+    state = ST_IDLE;
+    gc_give(GC_ANCS);
+    /* iOS refuses the CCCD writes until notification access is allowed
+       on the phone: keep retrying, quickly at first */
+    ancs_tries++;
+    ancs_start_at = hal_millis() + (ancs_tries < 8 ? 12000 : 60000);
+}
+
+static int ns_sub_done(uint16_t conn, const struct ble_gatt_error *err,
                        struct ble_gatt_attr *attr, void *arg)
 {
     (void)conn; (void)attr; (void)arg;
-    sub_inflight = 0;
-    if (err->status == 0) {
-        state = ST_LIVE;
-        notif_dirty = 1;
-    } else {
+    if (err->status != 0) {
         sub_fail = err->status;
-        state = ST_SUB_NS;           /* retried from ancs_tick / enc_ok */
-        disc_retry_at = hal_millis() + 1500;
+        disc_failed(err->status);
+        return 0;
     }
+    state = ST_LIVE;
+    ancs_tries = 0;
+    notif_dirty = 1;
+    gc_give(GC_ANCS);
     return 0;
 }
 
 static void subscribe_ns(void)
 {
-    uint8_t on[2] = {1, 0};
+    static const uint8_t on[2] = {1, 0};
     state = ST_SUB_NS;
-    sub_inflight = ble_gattc_write_flat(a_conn, h_ns_cccd, on, 2,
-                                        sub_done, NULL) == 0;
+    if (ble_gattc_write_flat(a_conn, h_ns_cccd, on, 2, ns_sub_done, NULL))
+        disc_failed(-4);
 }
 
-static int sub_done(uint16_t conn, const struct ble_gatt_error *err,
-                    struct ble_gatt_attr *attr, void *arg)
+static int ds_sub_done(uint16_t conn, const struct ble_gatt_error *err,
+                       struct ble_gatt_attr *attr, void *arg)
 {
     (void)conn; (void)attr; (void)arg;
-    sub_inflight = 0;
     if (err->status != 0) {
-        /* 0x05/0x0F = not yet paired/encrypted: iOS pairs us now and
-           ENC_CHANGE re-arms the subscribe; anything else -> retry */
         sub_fail = err->status;
-        disc_retry_at = hal_millis() + 1500;
+        disc_failed(err->status);
         return 0;
     }
-    state = ST_SUB_DS;
-    uint8_t on[2] = {1, 0};
-    if (h_ds_cccd)
-        sub_inflight = ble_gattc_write_flat(a_conn, h_ds_cccd, on, 2,
-                                            ds_sub_done, NULL) == 0;
-    else
-        state = ST_LIVE;
+    subscribe_ns();
     return 0;
 }
-int ancs_sub_fail(void) { return sub_fail; }
 
-static void disc_failed(int status);
+static void subscribe_ds(void)
+{
+    static const uint8_t on[2] = {1, 0};
+    state = ST_SUB_DS;
+    if (ble_gattc_write_flat(a_conn, h_ds_cccd, on, 2, ds_sub_done, NULL))
+        disc_failed(-4);
+}
 
-/* NimBLE's "discover all descriptors" over a service range reports every
-   attribute after the start handle, and its chr_val_handle argument is
-   just the start handle we passed (the service declaration) for every
-   one of them. 2.2.0 compared that against the NS/DS value handles,
-   which can never match, so neither CCCD was ever found and ANCS fell
-   back to idle without subscribing. A CCCD belongs to the closest
-   characteristic value handle below it. */
+/* NimBLE passes the start handle we gave (the service start) as chr for
+   every descriptor, never the characteristic's own value handle; see
+   gatt_owner.h for how the owner is worked out instead. */
 static int dsc_cb(uint16_t conn, const struct ble_gatt_error *error,
                   uint16_t chr, const struct ble_gatt_dsc *dsc, void *arg)
 {
     (void)conn; (void)arg; (void)chr;
     if (error->status == BLE_HS_EDONE) {
-        if (h_ns_cccd) {
-            state = ST_SUB_NS;
-            if (h_ds_cccd)
-                subscribe_ds();             /* DS first, then NS */
-            else
-                subscribe_ns();
-        } else {
-            disc_failed(-2);                /* no NS CCCD in the service */
-        }
+        if (h_ns_cccd && h_ds_cccd)
+            subscribe_ds();
+        else
+            disc_failed(-2);                /* a CCCD is missing */
         return 0;
     }
     if (error->status != 0) {
@@ -342,7 +431,7 @@ static int dsc_cb(uint16_t conn, const struct ble_gatt_error *error,
     }
     if (!dsc || ble_uuid_u16(&dsc->uuid.u) != 0x2902)
         return 0;
-    uint16_t owner = gatt_owner_of(dsc->handle, h_ns_val, h_ds_val, h_cp_val);
+    uint16_t owner = gatt_owner_of(&spans, dsc->handle);
     if (owner && owner == h_ns_val)
         h_ns_cccd = dsc->handle;
     else if (owner && owner == h_ds_val)
@@ -355,13 +444,13 @@ static int chr_cb(uint16_t conn, const struct ble_gatt_error *error,
 {
     (void)conn; (void)arg;
     if (error->status == BLE_HS_EDONE) {
-        if (h_ns_val && h_cp_val) {
+        if (h_ns_val && h_cp_val && h_ds_val) {
             state = ST_DSC;
             int rc = ble_gattc_disc_all_dscs(a_conn, svc_start, svc_end,
                                              dsc_cb, NULL);
             if (rc) disc_failed(rc);
         } else {
-            disc_failed(-3);                /* NS or CP missing */
+            disc_failed(-3);                /* NS, CP or DS missing */
         }
         return 0;
     }
@@ -371,6 +460,7 @@ static int chr_cb(uint16_t conn, const struct ble_gatt_error *error,
     }
     if (!chr)
         return 0;
+    gatt_spans_add(&spans, chr->def_handle, chr->val_handle);
     if (!ble_uuid_cmp(&chr->uuid.u, &uuid_ns.u))
         h_ns_val = chr->val_handle;
     else if (!ble_uuid_cmp(&chr->uuid.u, &uuid_cp.u))
@@ -385,69 +475,39 @@ static int svc_cb(uint16_t conn, const struct ble_gatt_error *error,
 {
     (void)conn; (void)arg;
     if (error->status == BLE_HS_EDONE) {
-        /* data call already saved the bounds; launch char discovery */
         if (svc_start) {
             state = ST_CHR;
-            ble_gattc_disc_all_chrs(a_conn, svc_start, svc_end,
-                                    chr_cb, NULL);
+            if (ble_gattc_disc_all_chrs(a_conn, svc_start, svc_end,
+                                        chr_cb, NULL))
+                disc_failed(-5);
         } else {
-            state = ST_IDLE;
+            disc_failed(-1);                /* no ANCS on this link yet */
         }
         return 0;
     }
-    if (error->status != 0 || !svc)
+    if (error->status != 0) {
+        disc_failed(error->status);
         return 0;
-    svc_start = svc->start_handle;
-    svc_end = svc->end_handle;
+    }
+    if (svc) {
+        svc_start = svc->start_handle;
+        svc_end = svc->end_handle;
+    }
     return 0;
 }
 
 static void ancs_begin(void)
 {
-    svc_start = 0;
+    if (!gc_take(GC_ANCS))
+        return;
+    ancs_start_at = 0;
+    svc_start = svc_end = 0;
     h_ns_val = h_ns_cccd = h_ds_val = h_ds_cccd = h_cp_val = 0;
+    gatt_spans_reset(&spans);
     state = ST_SVC;
-    ble_gattc_disc_svc_by_uuid(a_conn, &uuid_ancs.u, svc_cb, NULL);
-    disc_retry_at = hal_millis() + 12000;
+    if (ble_gattc_disc_svc_by_uuid(a_conn, &uuid_ancs.u, svc_cb, NULL))
+        disc_failed(-6);
 }
-
-/* discovery only starts once the link is encrypted (ancs_on_enc_ok):
-   iOS refuses ANCS and CTS access on an unencrypted link */
-void ancs_on_connect(uint16_t conn)
-{
-    a_conn = conn;
-    state = ST_IDLE;
-    sub_inflight = 0;
-    cts_state = 0;
-    /* ask for the time on every connect, whatever ANCS does. On an
-       unencrypted link iOS refuses the read; the 10 s retry and
-       ancs_on_enc_ok then try again once pairing is done */
-    cts_pending_at = hal_millis() + 2500;
-}
-
-void ancs_on_disconnect(void)
-{
-    a_conn = 0;
-    state = ST_IDLE;
-    sub_inflight = 0;
-    cts_state = 0;
-    cts_pending_at = 0;
-    notif_count = 0;
-    ds_len = 0;
-    notif_dirty = 1;
-}
-
-/* the CCCD write gets bounced until iOS finishes pairing — retry */
-void ancs_on_enc_ok(void)
-{
-    if (state == ST_IDLE)
-        ancs_begin();
-    else if (state == ST_SUB_NS && h_ns_cccd)
-        subscribe_ns();
-    if (cts_state != 3)
-        cts_pending_at = hal_millis() + 1500;
-}
-
 
 /* ---- Current Time Service client ----------------------------------------
    iOS exposes the phone's clock as a CTS *server*; it never writes to
@@ -456,48 +516,31 @@ static const ble_uuid16_t uuid_cts = BLE_UUID16_INIT(0x1805);
 static const ble_uuid16_t uuid_ct = BLE_UUID16_INIT(0x2A2B);
 static uint16_t cts_start_h, cts_end_h, cts_val_h;
 int ancs_cts_state(void) { return cts_state; }
-void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s);
 int phone_apply_cts(const uint8_t *t, int len);
-int ams_busy(void);
 
-/* no ANCS procedure in flight: idle, live, or parked between the
-   12 s resubscribe retries while iOS withholds notification access
-   (2.0.1 only synced the clock from IDLE/LIVE, so a phone that never
-   granted ANCS never set the time -> the face kept its placeholder
-   date, "FRI, OCT 24") */
-static int client_quiet(void)
+static void cts_end(int ok)
 {
-    if (ams_busy() || sub_inflight)
-        return 0;
-    if (state == ST_LIVE || state == ST_IDLE)
-        return 1;
-    /* parked between resubscribe attempts: nothing on the wire */
-    return state == ST_SUB_NS;
-}
-int ancs_client_idle(void)
-{
-    return client_quiet() && cts_state != 1 && cts_state != 2 &&
-           !cts_pending_at;
+    cts_state = ok ? 3 : 0;
+    if (ok)
+        cts_ok_at = hal_millis();
+    else
+        cts_retry_at = hal_millis() + 10000;
+    gc_give(GC_CTS);
 }
 
 static int cts_read_cb(uint16_t conn, const struct ble_gatt_error *error,
                        struct ble_gatt_attr *attr, void *arg)
 {
     (void)conn; (void)arg;
-    if (error->status != 0 || !attr || !attr->om) {
-        cts_state = 0;               /* retried after the next ENC change */
-        return 0;
-    }
     uint8_t t[10];
-    if (OS_MBUF_PKTLEN(attr->om) < 7 ||
+    if (error->status != 0 || !attr || !attr->om ||
+        OS_MBUF_PKTLEN(attr->om) < 7 ||
         os_mbuf_copydata(attr->om, 0, 7, t) != 0) {
-        cts_state = 0;
+        cts_end(0);
         return 0;
     }
     /* shared validation + weekday computed from the date (ble_svcs.c) */
-    cts_state = phone_apply_cts(t, 7) == 0 ? 3 : 0;
-    if (cts_state == 3)
-        cts_ok_at = hal_millis();
+    cts_end(phone_apply_cts(t, 7) == 0);
     return 0;
 }
 
@@ -506,16 +549,17 @@ static int cts_chr_cb(uint16_t conn, const struct ble_gatt_error *error,
 {
     (void)conn; (void)arg;
     if (error->status == BLE_HS_EDONE) {
-        if (cts_val_h) {
-            cts_state = 2;
-            ble_gattc_read(a_conn, cts_val_h, cts_read_cb, NULL);
-        } else {
-            cts_state = 0;
-        }
+        cts_state = 2;
+        if (!cts_val_h ||
+            ble_gattc_read(a_conn, cts_val_h, cts_read_cb, NULL))
+            cts_end(0);
         return 0;
     }
-    if (error->status == 0 && chr &&
-        !ble_uuid_cmp(&chr->uuid.u, &uuid_ct.u))
+    if (error->status != 0) {
+        cts_end(0);
+        return 0;
+    }
+    if (chr && !ble_uuid_cmp(&chr->uuid.u, &uuid_ct.u))
         cts_val_h = chr->val_handle;
     return 0;
 }
@@ -525,15 +569,17 @@ static int cts_svc_cb(uint16_t conn, const struct ble_gatt_error *error,
 {
     (void)conn; (void)arg;
     if (error->status == BLE_HS_EDONE) {
-        if (cts_start_h) {
+        if (!cts_start_h ||
             ble_gattc_disc_all_chrs(a_conn, cts_start_h, cts_end_h,
-                                    cts_chr_cb, NULL);
-        } else {
-            cts_state = 0;
-        }
+                                    cts_chr_cb, NULL))
+            cts_end(0);
         return 0;
     }
-    if (error->status == 0 && svc) {
+    if (error->status != 0) {
+        cts_end(0);
+        return 0;
+    }
+    if (svc) {
         cts_start_h = svc->start_handle;
         cts_end_h = svc->end_handle;
     }
@@ -542,52 +588,137 @@ static int cts_svc_cb(uint16_t conn, const struct ble_gatt_error *error,
 
 static void cts_begin(void)
 {
+    if (!gc_take(GC_CTS))
+        return;
     cts_start_h = cts_end_h = cts_val_h = 0;
     cts_state = 1;
     if (ble_gattc_disc_svc_by_uuid(a_conn, &uuid_cts.u, cts_svc_cb, NULL))
-        cts_state = 0;
+        cts_end(0);
 }
 
-/* watchdog: if discovery stalls mid-connection, restart it once */
+/* ---- link sequencer ------------------------------------------------------
+   Once the link is encrypted: the phone's time first, then AMS (music),
+   then ANCS (notifications). Each phase runs to its end, holding the
+   GATT lock, before the next one starts. */
+int ams_busy(void);
+int ams_start(void);
+void ams_abort(void);
+
+void ancs_on_connect(uint16_t conn)
+{
+    a_conn = conn;
+    state = ST_IDLE;
+    link_enc = 0;
+    seq_phase = seq_started = 0;
+    cts_state = 0;
+    ancs_tries = 0;
+    ancs_start_at = 0;
+    gc_owner = GC_FREE;
+    cpq_n = fq_n = 0;
+    fetch_at = 0;
+}
+
+void ancs_on_disconnect(void)
+{
+    a_conn = 0;
+    state = ST_IDLE;
+    link_enc = 0;
+    seq_phase = seq_started = 0;
+    cts_state = 0;
+    ancs_start_at = 0;
+    gc_owner = GC_FREE;
+    cpq_n = fq_n = 0;
+    fetch_at = 0;
+    notif_count = 0;
+    ds_len = 0;
+    notif_dirty = 1;
+}
+
+/* ENC_CHANGE ok: start (or, after a re-encryption, restart) the chain */
+void ancs_on_enc_ok(void)
+{
+    link_enc = 1;
+    if (seq_phase == 0) {
+        seq_phase = 1;
+        seq_started = 0;
+    }
+}
+
+int ancs_link_enc(void) { return link_enc; }
+int ancs_seq_phase(void) { return seq_phase; }
+
+/* no ANCS-side client procedure in flight (AMS asks before retrying) */
+int ancs_client_idle(void)
+{
+    return gc_owner == GC_FREE && seq_phase >= 4;
+}
+
 void ancs_tick(void)
 {
-    /* CTS goes after the ANCS handshake settles — one GATT client
-       procedure at a time on the single link */
-    if (cts_pending_at && hal_millis() >= cts_pending_at &&
-        client_quiet()) {
-        cts_pending_at = 0;
-        if (cts_state == 0)
-            cts_begin();
+    uint32_t now = hal_millis();
+    if (!a_conn)
+        return;
+    /* safety net: NimBLE times a procedure out at 30 s and calls back,
+       so the lock should never be held this long */
+    if (gc_owner != GC_FREE && now - gc_since > 40000) {
+        if (gc_owner == GC_ANCS)
+            disc_failed(-7);
+        else if (gc_owner == GC_CTS)
+            cts_end(0);
+        else if (gc_owner == GC_AMS)
+            ams_abort();
+        gc_owner = GC_FREE;
     }
-    if (state > ST_IDLE && state < ST_LIVE && disc_retry_at &&
-        hal_millis() > disc_retry_at) {
-        if (ams_busy() || cts_state == 1 || cts_state == 2 ||
-            sub_inflight) {
-            disc_retry_at = hal_millis() + 2000;   /* let it finish */
-            return;
+    if (!link_enc)
+        return;
+    switch (seq_phase) {
+    case 1:                              /* time */
+        if (!seq_started) {
+            if (gc_owner == GC_FREE) {
+                seq_started = 1;
+                if (cts_state != 3)
+                    cts_begin();
+            }
+        } else if (gc_owner == GC_FREE) {
+            seq_phase = 2;
+            seq_started = 0;
         }
-        /* discovery stalled with the clock still unset: the link is
-           free, so give the time read its turn before starting over */
-        if (state != ST_SUB_NS && cts_state == 0) {
-            disc_retry_at = hal_millis() + 4000;
-            cts_begin();
-            return;
+        return;
+    case 2:                              /* music */
+        if (!seq_started) {
+            if (gc_owner == GC_FREE) {
+                seq_started = 1;
+                ams_start();
+            }
+        } else if (gc_owner == GC_FREE && !ams_busy()) {
+            seq_phase = 3;
+            seq_started = 0;
         }
-        disc_retry_at = hal_millis() + 12000;
-        if (state == ST_SUB_NS && h_ns_cccd)
-            subscribe_ns();          /* resubscribe after an auth bounce */
-        else
-            ancs_begin();            /* discovery stalled: start over */
+        return;
+    case 3:                              /* notifications */
+        if (!seq_started) {
+            if (gc_owner == GC_FREE) {
+                seq_started = 1;
+                if (state != ST_LIVE)
+                    ancs_begin();
+            }
+        } else if (gc_owner == GC_FREE) {
+            seq_phase = 4;
+        }
+        return;
+    default:
+        break;
     }
+    /* steady state: retries and queued writes, still one at a time */
+    if (state == ST_IDLE && ancs_start_at &&
+        (int32_t)(now - ancs_start_at) >= 0 && gc_owner == GC_FREE)
+        ancs_begin();
     /* re-read the phone clock every 6 h on a long-lived link (drift) */
-    if (cts_state == 3 && a_conn && hal_millis() - cts_ok_at > 21600000u)
+    if (cts_state == 3 && now - cts_ok_at > 21600000u)
         cts_state = 0;
-    /* CTS: retry a failed read every 10 s while connected + idle */
-    if (cts_state == 0 && !cts_pending_at && a_conn && client_quiet()) {
-        static uint32_t cts_last_try;
-        if (hal_millis() - cts_last_try > 10000) {
-            cts_last_try = hal_millis();
-            cts_pending_at = hal_millis() + 200;
-        }
-    }
+    if (cts_state == 0 && (int32_t)(now - cts_retry_at) >= 0 &&
+        gc_owner == GC_FREE)
+        cts_begin();
+    fetch_pump();
+    cp_pump();
 }
