@@ -1475,7 +1475,12 @@ static void build_launcher(lv_obj_t *r)
 static void fmt_ms(uint32_t ms, char *out)
 {
     unsigned s = ms / 1000;
-    lv_snprintf(out, 12, "%02d:%02d", s / 60, s % 60);
+    /* past an hour (a night in bed, a long stopwatch) go h:mm:ss, not
+       "385:00" */
+    if (s >= 3600)
+        lv_snprintf(out, 12, "%u:%02u:%02u", s / 3600, s / 60 % 60, s % 60);
+    else
+        lv_snprintf(out, 12, "%02u:%02u", s / 60, s % 60);
 }
 
 static void start_workout(void)

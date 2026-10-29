@@ -268,6 +268,7 @@ int main(int argc, char **argv)
     snap_bpm = 0; shot(dir, SCR_FACE, "02_face_measuring");
     snap_hr_on = 0; shot(dir, SCR_FACE, "03_face_hr_off");
     snap_hr_on = 1; snap_bpm = 72;
+    snap_music_data.pos_ms = now_ms;
     /* 2.1 face states: music chip, no weather, unsynced / restored clock */
     snap_music_data.playing = 0; shot(dir, SCR_FACE, "04_face_no_music");
     snap_music_data.playing = 1;
@@ -276,11 +277,13 @@ int main(int argc, char **argv)
     shot(dir, SCR_FACE, "06_face_clock_restored");
     snap_restored = 0; shot(dir, SCR_FACE, "07_face_clock_unset");
     snap_synced = 1;
+    snap_wx_data.rx_ms = now_ms - 12 * 60000;
     shot(dir, SCR_WEATHER, "30_weather");
     snap_wx_data.ndays = 0; shot(dir, SCR_WEATHER, "31_weather_no_forecast");
     snap_wx_data.ndays = 5;
     snap_wx_on = 0; shot(dir, SCR_WEATHER, "32_weather_placeholder");
     snap_wx_on = 1;
+    snap_music_data.pos_ms = now_ms;
     shot(dir, SCR_MUSIC, "33_music_playing");
     snap_music_data.playing = 0; shot(dir, SCR_MUSIC, "34_music_paused");
     snap_music_data.playing = 1;
@@ -315,9 +318,13 @@ int main(int argc, char **argv)
     w_last_ms = 1754000; w_last_sets = 2; shot(dir, SCR_W_DONE, "14_w_done");
     w_active = 0;
     shot(dir, SCR_SLEEP, "15_sleep");
+    s_in_bed = 1; s_start_ms = now_ms - (6u * 3600000u + 25u * 60000u);
+    shot(dir, SCR_SLEEP, "15_sleep_in_bed"); s_in_bed = 0;
     shot(dir, SCR_S_DONE, "16_s_done");
     water_ml = 750; shot(dir, SCR_WATER, "17_water");
     clock_tab = 0; shot(dir, SCR_CLOCK, "18_clock_sw");
+    sw_running = 1; sw_t0 = now_ms - 83400; sw_acc = 0;
+    shot(dir, SCR_CLOCK, "18_clock_sw_running"); sw_running = 0; sw_t0 = 0;
     clock_tab = 1; shot(dir, SCR_CLOCK, "19_clock_timer");
     clock_tab = 2; shot(dir, SCR_CLOCK, "20_clock_alarm");
     alarm_ringing = 1; shot(dir, SCR_CLOCK, "20_clock_ringing"); alarm_ringing = 0;
