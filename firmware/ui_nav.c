@@ -1799,119 +1799,274 @@ static void build_water(lv_obj_t *r)
 
 /* ---- clock ----------------------------------------------------------------- */
 
+/* 2.2.3: the clock was the screen that "didn't do anything": the timer
+   had three fixed presets and buzzed once for 0.4 s on a screen you
+   might not be on, the alarm could only be set in 15-minute steps, had
+   no snooze, rang forever if you weren't there, and the stopwatch had
+   no laps. Now:
+     STOPWATCH  tenths, LAP while running (last lap + count), RESET
+     TIMER      set 1..99 min (-1/+1, +5, hold to repeat), START, PAUSE /
+                RESUME, CANCEL; when it ends it opens this tab and pulses
+                until DISMISS or +1 MIN, auto-stopping after a minute
+     ALARM      hour and minute steppers (tap 1, hold for 5), ON/OFF,
+                "rings in", SNOOZE 9 min / STOP; rings with the screen
+                off; after a minute of no answer it snoozes itself, and
+                gives up after three snoozes so it can't drain the battery */
+static lv_obj_t *lbl_clk_val, *lbl_clk_sub;
+static int timer_set_min = 5;
+static uint32_t timer_left_ms;        /* paused remainder, 0 = not paused */
+static uint32_t ring_start_ms;        /* alarm or timer ring began */
+static int alarm_snooze_mod = -1;     /* minute-of-day of the snooze ring */
+static int alarm_snoozes;
+static uint32_t sw_lap_t0;            /* stopwatch time at the last lap */
+static uint32_t sw_lap_last;
+static int sw_laps;
+
 static void clock_cb(lv_event_t *e);
+
+static uint32_t sw_now(uint32_t now)
+{
+    return sw_acc + (sw_running ? now - sw_t0 : 0);
+}
+
+static void fmt_sw(uint32_t ms, char *out)
+{
+    unsigned s = ms / 1000, t = ms / 100 % 10;
+    if (s >= 3600)
+        lv_snprintf(out, 16, "%u:%02u:%02u", s / 3600, s / 60 % 60, s % 60);
+    else
+        lv_snprintf(out, 16, "%02u:%02u.%u", s / 60, s % 60, t);
+}
+
+static void clock_alarm_text(void)
+{
+    char buf[24];
+    if (lbl_clk_val) {
+        lv_snprintf(buf, sizeof buf, "%02d:%02d", alarm_h, alarm_m);
+        lv_label_set_text(lbl_clk_val, buf);
+    }
+    if (!lbl_clk_sub)
+        return;
+    if (!hal_clock_synced() && !hal_clock_restored()) {
+        lv_label_set_text(lbl_clk_sub, "SET TIME FIRST");
+    } else if (alarm_snooze_mod >= 0) {
+        lv_snprintf(buf, sizeof buf, "SNOOZED %02d:%02d",
+                    alarm_snooze_mod / 60, alarm_snooze_mod % 60);
+        lv_label_set_text(lbl_clk_sub, buf);
+    } else if (!alarm_on) {
+        lv_label_set_text(lbl_clk_sub, "OFF");
+    } else {
+        int mod = hal_clock_hour() * 60 + hal_clock_minute();
+        int d = (alarm_h * 60 + alarm_m - mod + 1440) % 1440;
+        if (d == 0)
+            d = 1440;
+        lv_snprintf(buf, sizeof buf, "RINGS IN %dH %02dM", d / 60, d % 60);
+        lv_label_set_text(lbl_clk_sub, buf);
+    }
+}
+
+static void clock_timer_text(void)
+{
+    char buf[16];
+    if (!lbl_clk_val)
+        return;
+    lv_snprintf(buf, sizeof buf, "%02d:00", timer_set_min);
+    lv_label_set_text(lbl_clk_val, buf);
+}
+
+static lv_obj_t *clk_btn(lv_obj_t *r, const char *t, int x, int y, int w,
+                         int h, lv_color_t c, int id, int repeat)
+{
+    lv_obj_t *b = mk_btn(r, t, x, y, w, h, c, clock_cb);
+    lv_obj_set_user_data(b, (void *)(intptr_t)id);
+    if (repeat)        /* steppers: hold to repeat (no rebuild on these) */
+        lv_obj_add_event_cb(b, clock_cb, LV_EVENT_LONG_PRESSED_REPEAT, NULL);
+    return b;
+}
 
 static void build_clock(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "CLOCK", 1);
-    /* tabs: 40 px tall (were 70x28, and STOPWATCH at 16 px overflowed
-       its tab). Widths follow the label so all three fit one row. */
+    lbl_clk_val = lbl_clk_sub = NULL;
+    /* tabs: 40 px tall; widths follow the label so all three fit */
     static const char *tab[3] = {"STOPWATCH", "TIMER", "ALARM"};
     static const int tab_x[3] = {4, 110, 174}, tab_w[3] = {104, 62, 62};
     for (int i = 0; i < 3; i++) {
-        lv_obj_t *b = mk_btn(r, tab[i], tab_x[i], 44, tab_w[i], 40,
-                             clock_tab == i ? C_ACCENT : C_FILL, clock_cb);
-        lv_obj_set_user_data(b, (void *)(intptr_t)(20 + i));
+        lv_obj_t *b = clk_btn(r, tab[i], tab_x[i], 44, tab_w[i], 40,
+                              clock_tab == i ? C_ACCENT : C_FILL, 20 + i, 0);
         lv_obj_t *l = lv_obj_get_child(b, 0);
         lv_obj_set_style_text_font(l, &kenney12, 0);
         lv_obj_set_style_text_color(l, clock_tab == i ? C_BG : C_WHITE, 0);
     }
+    char buf[24];
+    uint32_t now = hal_millis();
     if (clock_tab == 0) {
-        char buf[16];
-        fmt_ms(sw_acc + (sw_running ? hal_millis() - sw_t0 : 0), buf);
-        lbl_time_big = mk_label_c(r, &kenney24, C_WHITE, 120, 104, buf);
-        lv_obj_t *b;
-        b = mk_btn(r, sw_running ? "STOP" : "START", 6, 150, 111, 60,
-                   C_ACCENT, clock_cb);
-        lv_obj_set_user_data(b, (void *)(intptr_t)10);
-        b = mk_btn(r, "RESET", 123, 150, 111, 60, C_FILL, clock_cb);
-        lv_obj_set_user_data(b, (void *)(intptr_t)11);
+        fmt_sw(sw_now(now), buf);
+        lbl_time_big = mk_label_c(r, &kenney24, C_WHITE, 120, 108, buf);
+        if (sw_laps) {
+            char l[16];
+            fmt_sw(sw_lap_last, l);
+            lv_snprintf(buf, sizeof buf, "LAP %d  %s", sw_laps, l);
+            mk_label_c(r, &kenney12, C_MUTED, 120, 136, buf);
+        }
+        clk_btn(r, sw_running ? "STOP" : "START", 6, 160, 111, 60,
+                C_ACCENT, 10, 0);
+        clk_btn(r, sw_running ? "LAP" : "RESET", 123, 160, 111, 60,
+                C_FILL, sw_running ? 16 : 11, 0);
     } else if (clock_tab == 1) {
         if (timer_done) {
-            mk_label_c(r, &kenney16, C_WARN, 120, 108, "TIME'S UP");
-            lv_obj_t *b = mk_btn(r, "DISMISS", 6, 150, 228, 60, C_FILL,
-                                 clock_cb);
-            lv_obj_set_user_data(b, (void *)(intptr_t)12);
-        } else if (timer_end_ms) {
-            char buf[16];
-            fmt_ms(timer_end_ms - hal_millis(), buf);
-            lbl_time_big = mk_label_c(r, &kenney24, C_WARN, 120, 104, buf);
-            lv_obj_t *b = mk_btn(r, "CANCEL", 6, 150, 228, 60, C_FILL,
-                                 clock_cb);
-            lv_obj_set_user_data(b, (void *)(intptr_t)13);
+            mk_label_c(r, &kenney24, C_WARN, 120, 106, "TIME'S UP");
+            clk_btn(r, "+1 MIN", 6, 150, 111, 60, C_FILL, 34, 0);
+            clk_btn(r, "DISMISS", 123, 150, 111, 60, C_WARN, 12, 0);
+        } else if (timer_end_ms || timer_left_ms) {
+            fmt_ms(timer_end_ms ? timer_end_ms - now : timer_left_ms, buf);
+            lbl_time_big = mk_label_c(r, &kenney24,
+                                      timer_left_ms ? C_MUTED : C_WARN,
+                                      120, 108, buf);
+            if (timer_left_ms)
+                mk_label_c(r, &kenney12, C_MUTED, 120, 136, "PAUSED");
+            clk_btn(r, timer_left_ms ? "RESUME" : "PAUSE", 6, 160, 111, 60,
+                    C_ACCENT, 17, 0);
+            clk_btn(r, "CANCEL", 123, 160, 111, 60, C_FILL, 13, 0);
         } else {
-            /* presets: 72x64 (were 68x40) */
-            static const char *p[3] = {"1 MIN", "5 MIN", "10 MIN"};
-            for (int i = 0; i < 3; i++) {
-                lv_obj_t *b = mk_btn(r, p[i], 6 + i * 78, 116, 72, 64,
-                                     C_FILL, clock_cb);
-                lv_obj_set_user_data(b, (void *)(intptr_t)(30 + i));
-            }
+            clk_btn(r, "-1M", 6, 92, 62, 48, C_FILL, 35, 1);
+            lbl_clk_val = mk_label_c(r, &kenney24, C_WHITE, 120, 116, "");
+            clock_timer_text();
+            clk_btn(r, "+1M", 172, 92, 62, 48, C_FILL, 36, 1);
+            clk_btn(r, "+5M", 172, 144, 62, 46, C_FILL, 37, 1);
+            clk_btn(r, "1M", 6, 144, 62, 46, C_FILL, 38, 0);
+            clk_btn(r, "START", 6, 196, 228, 40, C_ACCENT, 33, 0);
         }
     } else {
-        char buf[8];
         lv_snprintf(buf, sizeof buf, "%02d:%02d", alarm_h, alarm_m);
         if (alarm_ringing) {
-            mk_label_c(r, &kenney24, C_WARN, 120, 100, buf);
-            lv_obj_t *b = mk_btn(r, "STOP", 6, 140, 228, 72, C_WARN,
-                                 clock_cb);
-            lv_obj_set_user_data(b, (void *)(intptr_t)15);
+            mk_label_c(r, &kenney24, C_WARN, 120, 106, buf);
+            clk_btn(r, "SNOOZE", 6, 140, 111, 72, C_FILL, 18, 0);
+            clk_btn(r, "STOP", 123, 140, 111, 72, C_WARN, 15, 0);
             return;
         }
-        /* steppers 62x48 / 62x46 (were 40x36 and 40x28); the labels
-           now say what they step, so the "HOUR / 15 MIN" caption goes */
-        lv_obj_t *b;
-        b = mk_btn(r, "-1H", 6, 92, 62, 48, C_FILL, clock_cb);
-        lv_obj_set_user_data(b, (void *)(intptr_t)40);
-        mk_label_c(r, &kenney24, C_WHITE, 120, 103, buf);
-        b = mk_btn(r, "+1H", 172, 92, 62, 48, C_FILL, clock_cb);
-        lv_obj_set_user_data(b, (void *)(intptr_t)41);
-        b = mk_btn(r, "-15M", 6, 144, 62, 46, C_FILL, clock_cb);
-        lv_obj_set_user_data(b, (void *)(intptr_t)42);
-        b = mk_btn(r, "+15M", 172, 144, 62, 46, C_FILL, clock_cb);
-        lv_obj_set_user_data(b, (void *)(intptr_t)43);
-        if (!hal_clock_synced()) {
-            mk_label_c(r, &kenney12, C_MUTED, 120, 153, "SET TIME");
-            mk_label_c(r, &kenney12, C_MUTED, 120, 167, "FIRST");
-        }
-        b = mk_toggle(r, alarm_on ? "ALARM ON" : "ALARM OFF",
-                      6, 196, 228, alarm_on, clock_cb);
+        clk_btn(r, "-1H", 6, 92, 62, 48, C_FILL, 40, 1);
+        lbl_clk_val = mk_label_c(r, &kenney24, C_WHITE, 120, 108, buf);
+        clk_btn(r, "+1H", 172, 92, 62, 48, C_FILL, 41, 1);
+        clk_btn(r, "-1M", 6, 144, 62, 46, C_FILL, 42, 1);
+        clk_btn(r, "+1M", 172, 144, 62, 46, C_FILL, 43, 1);
+        lbl_clk_sub = mk_label_c(r, &kenney12, C_MUTED, 120, 167, "");
+        clock_alarm_text();
+        lv_obj_t *b = mk_toggle(r, alarm_on ? "ALARM ON" : "ALARM OFF",
+                                6, 196, 228, alarm_on, clock_cb);
         lv_obj_set_height(b, 40);
         lv_obj_set_user_data(b, (void *)(intptr_t)14);
     }
 }
 
+static void ring_stop(void)
+{
+    hal_motor(0);
+    motor_off_at = 0;
+    ring_start_ms = 0;
+}
+
+static void alarm_snooze(void)
+{
+    int mod = hal_clock_hour() * 60 + hal_clock_minute();
+    alarm_snooze_mod = (mod + 9) % 1440;
+    alarm_snoozes++;
+    alarm_ringing = 0;
+    ring_stop();
+}
+
 static void clock_cb(lv_event_t *e)
 {
     int v = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
-    if (v >= 20) {
+    int rep = lv_event_get_code(e) == LV_EVENT_LONG_PRESSED_REPEAT;
+    if (v >= 20 && v < 30) {
         clock_tab = v - 20;
         rebuild();
         return;
     }
     uint32_t now = hal_millis();
     switch (v) {
-    case 10:
+    case 10:                                   /* start / stop */
         if (sw_running) { sw_acc += now - sw_t0; sw_running = 0; }
         else { sw_t0 = now; sw_running = 1; }
         break;
-    case 11: sw_running = 0; sw_acc = 0; break;
-    case 12: timer_done = 0; break;
-    case 13: timer_end_ms = 0; break;
-    case 14: alarm_on ^= 1; persist_mark(); break;
-    case 15:
-        alarm_ringing = 0;
-        hal_motor(0);
-        motor_off_at = 0;
+    case 11:                                   /* reset */
+        sw_running = 0; sw_acc = 0; sw_laps = 0; sw_lap_t0 = 0;
+        sw_lap_last = 0;
         break;
-    case 40: alarm_h = (alarm_h + 23) % 24; persist_mark(); break;
-    case 41: alarm_h = (alarm_h + 1) % 24; persist_mark(); break;
-    case 42: alarm_m = (alarm_m + 45) % 60; persist_mark(); break;
-    case 43: alarm_m = (alarm_m + 15) % 60; persist_mark(); break;
-    case 30: timer_end_ms = now + 60000; break;
-    case 31: timer_end_ms = now + 300000; break;
-    case 32: timer_end_ms = now + 600000; break;
+    case 16: {                                 /* lap */
+        uint32_t t = sw_now(now);
+        sw_lap_last = t - sw_lap_t0;
+        sw_lap_t0 = t;
+        sw_laps++;
+        buzz(30);
+        break;
+    }
+    case 12:                                   /* timer dismiss */
+        timer_done = 0;
+        ring_stop();
+        break;
+    case 34:                                   /* +1 min after it ends */
+        timer_done = 0;
+        ring_stop();
+        timer_end_ms = now + 60000;
+        break;
+    case 13: timer_end_ms = 0; timer_left_ms = 0; break;
+    case 17:                                   /* pause / resume */
+        if (timer_left_ms) {
+            timer_end_ms = now + timer_left_ms;
+            timer_left_ms = 0;
+        } else if (timer_end_ms) {
+            timer_left_ms = timer_end_ms - now;
+            if (!timer_left_ms)
+                timer_left_ms = 1;
+            timer_end_ms = 0;
+        }
+        break;
+    case 33:
+        timer_end_ms = now + (uint32_t)timer_set_min * 60000u;
+        timer_left_ms = 0;
+        break;
+    case 35: case 36: case 37: case 38: {
+        int st = v == 35 ? -1 : v == 36 ? 1 : v == 37 ? 5 : 0;
+        if (rep && st)
+            st *= 5;
+        timer_set_min = v == 38 ? 1 : timer_set_min + st;
+        if (timer_set_min < 1) timer_set_min = 1;
+        if (timer_set_min > 99) timer_set_min = 99;
+        clock_timer_text();
+        return;                                /* in place: hold works */
+    }
+    case 14:
+        alarm_on ^= 1;
+        alarm_snooze_mod = -1;
+        persist_mark();
+        break;
+    case 15:                                   /* alarm stop */
+        alarm_ringing = 0;
+        alarm_snooze_mod = -1;
+        alarm_snoozes = 0;
+        ring_stop();
+        break;
+    case 18:                                   /* snooze 9 min */
+        alarm_snooze();
+        break;
+    case 40: case 41: case 42: case 43: {
+        int st = (v == 40 || v == 42) ? -1 : 1;
+        if (v >= 42) {
+            int m = alarm_h * 60 + alarm_m + st * (rep ? 5 : 1);
+            m = (m + 1440) % 1440;
+            alarm_h = m / 60;
+            alarm_m = m % 60;
+        } else {
+            alarm_h = (alarm_h + st + 24) % 24;
+        }
+        alarm_snooze_mod = -1;
+        persist_mark();
+        clock_alarm_text();
+        return;                                /* in place: hold works */
+    }
     }
     rebuild();
 }
@@ -3064,6 +3219,7 @@ static void rebuild(void)
     ui_face_breath_stop();   /* anim must die before its label does */
     lv_obj_clean(root);
     lbl_time_big = NULL;
+    lbl_clk_val = lbl_clk_sub = NULL;
     cardio_trace = NULL;
     cardio_bpm = NULL;
     cardio_art = NULL;
@@ -3178,15 +3334,21 @@ void ui_tick(void)
         buzz2_at = 0;
         buzz(35);
     }
-    if (timer_end_ms && now >= timer_end_ms) {
+    if (timer_end_ms && (int32_t)(now - timer_end_ms) >= 0) {
+        /* 2.2.3: was one 0.4 s buzz on whatever screen you were on; now
+           it opens the timer and pulses until dismissed (max 1 min) */
         timer_end_ms = 0;
         timer_done = 1;
-        hal_motor(1);
-        motor_off_at = now + 400;
+        ring_start_ms = now;
         if (asleep)
             ui_wake();
-        if (cur == SCR_CLOCK)
+        clock_tab = 1;
+        if (cur == SCR_CLOCK) {
             rebuild();
+        } else {
+            nav_sp = 0;
+            nav_to(SCR_CLOCK);
+        }
     }
     if (motor_off_at && now >= motor_off_at) {
         motor_off_at = 0;
@@ -3236,23 +3398,47 @@ void ui_tick(void)
     }
     /* alarm: once per matching minute, buzz in 500 ms pulses until STOP */
     /* a restored clock rings too: a late alarm beats a missed one */
-    if (alarm_on && (hal_clock_synced() || hal_clock_restored())) {
+    if ((alarm_on || alarm_snooze_mod >= 0) &&
+        (hal_clock_synced() || hal_clock_restored())) {
         int mod = hal_clock_hour() * 60 + hal_clock_minute();
-        if (mod == alarm_h * 60 + alarm_m && alarm_fired_min != mod) {
+        int due = (alarm_on && mod == alarm_h * 60 + alarm_m) ||
+                  mod == alarm_snooze_mod;
+        if (due && alarm_fired_min != mod && !alarm_ringing) {
+            if (mod == alarm_h * 60 + alarm_m)
+                alarm_snoozes = 0;        /* a new day's alarm */
+            alarm_snooze_mod = -1;
             alarm_fired_min = mod;
             alarm_ringing = 1;
+            ring_start_ms = now;
             clock_tab = 2;
             if (asleep)
                 ui_wake();
             nav_sp = 0;
             nav_to(SCR_CLOCK);
         }
-        if (mod != alarm_h * 60 + alarm_m)
+        if (!due)
             alarm_fired_min = -1;
     }
-    if (alarm_ringing) {
+    if (alarm_ringing || (timer_done && ring_start_ms)) {
         hal_motor((now / 500) & 1);
         last_input_ms = now;     /* never sleep through it */
+        if (now - ring_start_ms > 60000) {
+            /* nobody answered in a minute: the alarm snoozes itself (up
+               to three times), the timer just stops buzzing */
+            if (alarm_ringing) {
+                if (alarm_snoozes < 3) {
+                    alarm_snooze();
+                } else {
+                    alarm_ringing = 0;
+                    alarm_snoozes = 0;
+                    ring_stop();
+                }
+            } else {
+                ring_stop();
+            }
+            if (cur == SCR_CLOCK)
+                rebuild();
+        }
     }
     /* deferred flash write: 2 s after the last change, or on sleep */
     if (persist_dirty && now - persist_dirty_ms > 2000)
@@ -3340,14 +3526,19 @@ void ui_tick(void)
     case SCR_SLEEP:
     case SCR_CLOCK: {
         static uint32_t last;
-        if (now - last >= 500) {
+        /* the stopwatch shows tenths: 10 Hz while it runs */
+        uint32_t iv = (cur == SCR_CLOCK && clock_tab == 0 && sw_running)
+                      ? 100 : 500;
+        if (now - last >= iv) {
             last = now;
             if (lbl_time_big) {
                 char buf[16];
                 if (cur == SCR_SLEEP && s_in_bed)
                     fmt_ms(now - s_start_ms, buf);
+                else if (cur == SCR_SLEEP)
+                    break;
                 else if (clock_tab == 0)
-                    fmt_ms(sw_acc + (sw_running ? now - sw_t0 : 0), buf);
+                    fmt_sw(sw_now(now), buf);
                 else if (timer_end_ms)
                     fmt_ms(timer_end_ms - now, buf);
                 else
