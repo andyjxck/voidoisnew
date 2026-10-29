@@ -16,9 +16,24 @@ MEMORY
 
 SECTIONS
 {
-    .text :
+    /* The vector table gets its own output section, pinned to the start
+       of FLASH. MCUBoot jumps through the table at slot + header size
+       (0x8020), and imgtool puts the first byte of the .bin there.
+       With the table inside .text, any 64-byte-aligned input section
+       (newlib's strlen in arm-none-eabi-gcc 14 is .p2align 6) raised
+       .text's alignment and moved the whole section to 0x8040. The
+       .bin then started at 0x8040 but was flashed at 0x8020, so every
+       address in the image was 0x20 off and the watch faulted before
+       main(): the boot loop in 2.0.0. */
+    .vectors ORIGIN(FLASH) :
     {
         KEEP(*(.vectors))
+    } > FLASH
+
+    ASSERT(ADDR(.vectors) == ORIGIN(FLASH), "vector table must sit at 0x8020")
+
+    .text :
+    {
         *(.text*)
         *(.rodata*)
         KEEP(*(.init))

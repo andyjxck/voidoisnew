@@ -7,6 +7,8 @@ CROSS     ?= $(TOOLCHAIN)/arm-none-eabi-
 CC      = $(CROSS)gcc
 OBJCOPY = $(CROSS)objcopy
 SIZE    = $(CROSS)size
+OBJDUMP = $(CROSS)objdump
+NM      = $(CROSS)nm
 PYTHON  = $(TOOLS)/python3
 
 ARCH    = -mcpu=cortex-m4 -mthumb -mabi=aapcs -mfloat-abi=hard -mfpu=fpv4-sp-d16
@@ -16,7 +18,7 @@ CFLAGS  = $(ARCH) -std=c11 -Os -g -ffunction-sections -fdata-sections \
 LDFLAGS = $(ARCH) -T link.ld -Wl,--gc-sections -Wl,-Map=voidos-app.map \
           -specs=nano.specs -Wl,--no-warn-rwx-segments
 
-VERSION ?= 2.0.0
+VERSION ?= 2.0.1
 BIN      = voidos-app.bin
 IMG      = voidos-app-image.bin
 ZIP      = voidos-dfu-$(VERSION).zip
@@ -98,13 +100,26 @@ vendor/lvgl/src/%.o: vendor/lvgl/src/%.c lv_conf.h
 voidos-app.out: $(OBJS) link.ld
 	$(CC) $(OBJS) $(LDFLAGS) -lm -o $@
 
+# The .bin is flashed right after the 32-byte MCUBoot header, so its
+# first byte must be the vector table at 0x8020 and the table's reset
+# vector must be Reset_Handler. Refuse to package an image that would
+# be shifted (the 2.0.0 boot loop).
 $(BIN): voidos-app.out
 	$(OBJCOPY) -O binary $< $@
+	@first=$$($(OBJDUMP) -h $< | awk '$$2!~/^\.(data|bss)$$/ && $$4 ~ /^0000[0-9a-f]+$$/ && $$3!="00000000" {print $$4; exit}'); \
+	vec=$$($(NM) $< | awk '$$3=="vectors"{print $$1}'); \
+	rst=$$($(NM) $< | awk '$$3=="Reset_Handler"{print $$1}'); \
+	word=$$(od -An -tx4 -j4 -N4 $@ | tr -d ' '); \
+	if [ "$$first" != "00008020" ] || [ "$$vec" != "00008020" ] || \
+	   [ $$((0x$$word & ~1)) -ne $$((0x$$rst)) ]; then \
+	  echo "image layout check FAILED: first section $$first, vectors $$vec, reset vector $$word, Reset_Handler $$rst"; \
+	  rm -f $@; exit 1; fi; \
+	echo "image layout OK: vectors at 0x$$vec, reset vector 0x$$word"
 
 # MCUBoot image: 32-byte header, app slot 475136 bytes at 0x8000.
-# Same imgtool arguments as InfiniTime's build (--align 1).
+# --align 4 as in 1.6/1.6.2, the builds that booted on the watch.
 $(IMG): $(BIN)
-	$(TOOLS)/imgtool create --align 1 --version $(VERSION) --header-size 32 \
+	$(TOOLS)/imgtool create --align 4 --version $(VERSION) --header-size 32 \
 	    --slot-size 475136 --pad-header $< $@
 
 $(ZIP): $(IMG)

@@ -497,22 +497,6 @@ static int touch_was_down;
 static int last_gesture;
 static int last_gesture_x;
 
-/* the two config writes InfiniTime's Cst816s::Init makes after every
-   reset pulse. A reset puts these back to the chip defaults, so they
-   are re-sent on wake too (1.6.2 only sent them at boot, so after the
-   first screen-off taps no longer pulsed INT and touch fell back to
-   the slow 100 ms safety poll). */
-static void touch_config(void)
-{
-    /* motion mask: continuous left/right + double-click (as InfiniTime) */
-    i2c_write_reg(CST816_ADDR, 0xEC, 0x05);
-    /* IRQ control: pulse INT on touch, on touch-state change, on gesture.
-       Without this the controller stays silent for plain taps/drags. */
-    i2c_write_reg(CST816_ADDR, 0xFA, 0x70);
-    /* disable the 5s no-gesture auto-reset (it kills mid-swipe touches) */
-    i2c_write_reg(CST816_ADDR, 0xFB, 0x00);
-}
-
 static void touch_init(void)
 {
     imark(0, 0xFFFF);          /* white:  entered touch_init */
@@ -528,26 +512,30 @@ static void touch_init(void)
     i2c_read_reg(CST816_ADDR, 0x15, &dummy, 1);
     hal_delay_ms(5);
     imark(2, 0xFD20);          /* orange: wake read done */
-    /* InfiniTime does a second dummy read of the chip ID here */
-    i2c_read_reg(CST816_ADDR, 0xA7, &dummy, 1);
+    /* explicit exit-sleep in case a previous firmware left it asleep */
+    i2c_write_reg(CST816_ADDR, 0xA5, 0x00);
     hal_delay_ms(5);
-    imark(3, 0xFFE0);          /* yellow: wake reads done */
-    /* which of PineTime's known I2C parts ACK (diagnostic). 1.6.2 probed
-       every address 0x08..0x77 here, poking unknown parts on the bus;
-       only the four that can be fitted are probed now: CST816S 0x15,
-       BMA42x 0x18/0x19, HRS3300 0x44. */
-    {
-        static const uint8_t known[] = {0x15, 0x18, 0x19, 0x44};
-        for (unsigned i = 0; i < sizeof known; i++) {
-            uint8_t b;
-            nimble_stage(known[i]);
-            if (i2c_read_reg(known[i], 0x00, &b, 1) && touch_diag.scan_count < 8)
-                touch_diag.scan[touch_diag.scan_count++] = known[i];
-        }
+    imark(3, 0xFFE0);          /* yellow: sleep-exit write done */
+    /* bus scan: which I2C devices actually ACK (diagnostic). One green
+       stripe per 8 probed addresses — the count of bars shows where a
+       probe kills the bus, and the stage register holds the address. */
+    for (int a = 0x08; a < 0x78; a++) {
+        if ((a & 7) == 0)
+            imark(4 + (a >> 3), 0x07E0);
+        nimble_stage(a);
+        uint8_t b;
+        if (i2c_read_reg(a, 0x00, &b, 1) && touch_diag.scan_count < 8)
+            touch_diag.scan[touch_diag.scan_count++] = (uint8_t)a;
     }
     nimble_stage(79);
-    imark(4, 0x07E0);          /* green:  bus probe done */
-    touch_config();
+    imark(4, 0x07E0);          /* green:  bus scan done */
+    /* motion mask: continuous left/right + double-click (as InfiniTime) */
+    i2c_write_reg(CST816_ADDR, 0xEC, 0x05);
+    /* IRQ control: pulse INT on touch, on touch-state change, on gesture.
+       Without this the controller stays silent for plain taps/drags. */
+    i2c_write_reg(CST816_ADDR, 0xFA, 0x70);
+    /* disable the 5s no-gesture auto-reset (it kills mid-swipe touches) */
+    i2c_write_reg(CST816_ADDR, 0xFB, 0x00);
     imark(5, 0x07FF);          /* cyan:   config writes done */
     /* input, pull-up, SENSE low; with DETECTMODE=LDETECT the LATCH bit
        captures the controller's short INT pulse until we clear it */
@@ -646,29 +634,21 @@ int touch_sample(int *x, int *y)
 
 /* CST816S gesture register (0x01): 1=up 2=down 3=left 4=right
    5=single-tap 0x0B=double-tap 0x0C=long-press. Returns and clears the latest ID. */
-/* CST816S deep sleep while the display is off (InfiniTime Cst816s::
-   Sleep: reset pulse, then 0xA5 = 0x03). In deep sleep the chip does
-   not report touches; the wake paths are the button and raise-to-wake.
-   Waking needs a reset pulse and the full config again (Cst816s::
-   Wakeup calls Init). */
+/* CST816S low-power mode while the display is off; INT still fires on
+   a touch so the wake path keeps working */
 void touch_sleep(int on)
 {
     if (!touch_ok)
         return;
-    GPIO_OUTCLR = BIT(PIN_TP_RESET);
-    hal_delay_ms(5);
-    GPIO_OUTSET = BIT(PIN_TP_RESET);
-    hal_delay_ms(50);
-    if (on) {
+    if (on)
         i2c_write_reg(CST816_ADDR, 0xA5, 0x03);
-    } else {
-        uint8_t dummy;
-        i2c_read_reg(CST816_ADDR, 0x15, &dummy, 1);
+    else {
+        /* only a reset pulse wakes it: toggle the TP reset line */
+        GPIO_OUTCLR = BIT(PIN_TP_RESET);
         hal_delay_ms(5);
-        i2c_read_reg(CST816_ADDR, 0xA7, &dummy, 1);
-        hal_delay_ms(5);
-        touch_config();
-        GPIO_LATCH = BIT(PIN_TP_INT);
+        GPIO_OUTSET = BIT(PIN_TP_RESET);
+        hal_delay_ms(50);
+        i2c_write_reg(CST816_ADDR, 0xA5, 0x00);
     }
 }
 

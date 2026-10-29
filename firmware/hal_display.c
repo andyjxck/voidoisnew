@@ -4,8 +4,6 @@
 #include "voidos/hal.h"
 #include "board.h"
 
-uint32_t hal_millis_raw(void);
-
 /* nRF52832 SPIM MAXCNT is 8 bits: at most 255 bytes per DMA transfer */
 #define SPI_CHUNK 240
 static uint8_t dma_buf[SPI_CHUNK] __attribute__((aligned(4)));
@@ -65,8 +63,6 @@ static void lcd_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
     lcd_cmd(0x2C);
 }
 
-static uint32_t lcd_sleep_exit_ms;
-
 void display_init(void)
 {
     GPIO_DIRSET = BIT(PIN_SCK) | BIT(PIN_MOSI) | BIT(PIN_LCD_DC) |
@@ -83,39 +79,21 @@ void display_init(void)
     SPIM0_CONFIG = 0x6;        /* mode 3, MSB first */
     SPIM0_ENABLE = 7;
 
-    /* bring-up sequence is InfiniTime's St7789::Init, command for
-       command (1.6.2 skipped the software reset and the porch, frame
-       rate, VDV, power and gate settings, leaving the panel on its
-       power-on defaults) */
     GPIO_OUTCLR = BIT(PIN_LCD_RST);
-    hal_delay_ms(1);
+    hal_delay_ms(10);
     GPIO_OUTSET = BIT(PIN_LCD_RST);
-    hal_delay_ms(125);
+    hal_delay_ms(120);
 
     lcd_select(1);
-    lcd_cmd(0x01); hal_delay_ms(125);  /* SWRESET */
-    lcd_cmd(0xDF);                     /* Command2 enable */
-    lcd_data((const uint8_t[]){0x5a, 0x69, 0x02, 0x01}, 4);
+    lcd_cmd(0x11); hal_delay_ms(120);  /* SLPOUT */
     lcd_cmd(0x3A); lcd_byte(0x55);     /* 16-bit colour */
     lcd_cmd(0x36); lcd_byte(0x00);     /* MADCTL */
-    lcd_cmd(0x2A); lcd_data((const uint8_t[]){0, 0, 0, 240}, 4);
-    lcd_cmd(0x2B); lcd_data((const uint8_t[]){0, 0, 0, 240}, 4);
     lcd_cmd(0x21);                     /* INVON */
-    lcd_cmd(0xB2);                     /* porch */
-    lcd_data((const uint8_t[]){0x02, 0x03, 0x01, 0xed, 0xed}, 5);
-    lcd_cmd(0xC6); lcd_byte(0x0a);     /* normal-mode frame rate */
-    lcd_cmd(0xB3);                     /* idle frame rate control off */
-    lcd_data((const uint8_t[]){0x00, 0x0a, 0x0a}, 3);
     lcd_cmd(0x13);                     /* NORON */
-    lcd_cmd(0xC4); lcd_byte(0x10);     /* VDV */
-    lcd_cmd(0xD0);                     /* power control 1: lowest voltages */
-    lcd_data((const uint8_t[]){0xa4, 0x00}, 2);
-    lcd_cmd(0xE8); lcd_byte(0xb3);     /* power control 2 */
-    lcd_cmd(0xB7); lcd_byte(0x00);     /* gate control: lowest VGL/VGH */
     /* GRAM is random out of reset — clear to black BEFORE DISPON or
        the first thing on the glass is noise stripes */
-    lcd_cmd(0x2A); lcd_data((const uint8_t[]){0, 0, 0, 239}, 4);
-    lcd_cmd(0x2B); lcd_data((const uint8_t[]){0, 0, 0, 239}, 4);
+    lcd_cmd(0x2A); lcd_data((uint8_t[]){0, 0, 0, 239}, 4);
+    lcd_cmd(0x2B); lcd_data((uint8_t[]){0, 0, 0, 239}, 4);
     lcd_cmd(0x2C);
     GPIO_OUTSET = BIT(PIN_LCD_DC);
     {
@@ -123,36 +101,23 @@ void display_init(void)
         for (int row = 0; row < 240; row++)
             spi_tx_raw(zeros, sizeof zeros);
     }
-    lcd_cmd(0x11); hal_delay_ms(6);    /* SLPOUT */
-    lcd_sleep_exit_ms = hal_millis_raw();
-    lcd_cmd(0x29);                     /* DISPON */
+    lcd_cmd(0x29); hal_delay_ms(20);   /* DISPON */
     lcd_select(0);
 }
 
 /* panel sleep: SLPIN cuts the LCD's own draw current while the watch
-   is idle. The ST7789 needs 120 ms between SLPOUT and the next SLPIN
-   (and after SLPIN before SLPOUT); InfiniTime waits 125 ms. */
-static void lcd_sleep_guard(void)
-{
-    uint32_t d = hal_millis_raw() - lcd_sleep_exit_ms;
-    if (d < 125)
-        hal_delay_ms(125 - d);
-}
-
+   is idle; SLPOUT needs 120 ms before pixels are valid again */
 void display_sleep(int on)
 {
     lcd_select(1);
-    lcd_sleep_guard();
     if (on) {
         lcd_cmd(0x28);                 /* DISPOFF */
         lcd_cmd(0x10);                 /* SLPIN */
-        hal_delay_ms(6);
     } else {
         lcd_cmd(0x11);                 /* SLPOUT */
-        hal_delay_ms(6);
+        hal_delay_ms(120);
         lcd_cmd(0x29);                 /* DISPON */
     }
-    lcd_sleep_exit_ms = hal_millis_raw();
     lcd_select(0);
 }
 
