@@ -64,8 +64,12 @@ uicheck:
 	mkdir -p build/uisnap
 	./tests/uisnap/snap build/uisnap
 
+# smallest LVGL heap that renders every screen identically (see script)
+heapcheck:
+	./tests/uisnap/heapcheck.sh
+
 clean:
 	rm -rf build/voidos-sim build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/test_hr_old build/sensors_2_1.c build/uisnap
 	-rmdir build 2>/dev/null || true
 
-.PHONY: all test uicheck clean hrcompare
+.PHONY: all test uicheck clean hrcompare heapcheck

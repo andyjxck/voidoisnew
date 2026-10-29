@@ -9,6 +9,7 @@
 
 extern const lv_font_t kenney9, kenney12, kenney16, kenney24, kenney56;
 int sensors_bpm(void);
+int sensors_bpm_stale(void);   /* 1 = held last reading, show greyed */
 int ui_steps(void);
 int sensors_ppg(int i, int *out_y100);
 int sensors_hrs_ok(void);
@@ -189,6 +190,25 @@ static void dial_draw(lv_event_t *ev)
 
 }
 
+#define BPM_STALE_RGB 0x5C6678   /* held BPM: same grey on face + cardio */
+
+/* face BPM label: live colour, or grey while the reading is held.
+   The cache key folds the stale bit in so a lock change repaints. */
+static void bpm_label(lv_obj_t *lbl, uint32_t live_rgb)
+{
+    char buf[8];
+    int bpm = sensors_bpm();
+    int stale = bpm > 0 && sensors_bpm_stale();
+    int key = bpm * 2 + stale;
+    if (key == last_bpm)
+        return;
+    lv_snprintf(buf, sizeof buf, "%d", bpm > 0 ? bpm : 0);
+    lv_label_set_text(lbl, bpm > 0 ? buf : "--");
+    lv_obj_set_style_text_color(lbl, lv_color_hex(stale ? BPM_STALE_RGB
+                                                        : live_rgb), 0);
+    last_bpm = key;
+}
+
 static void heart_draw(lv_event_t *ev)
 {
     static const char shape[6][8] = {
@@ -197,10 +217,14 @@ static void heart_draw(lv_event_t *ev)
     lv_layer_t *layer = lv_event_get_layer(ev);
     lv_area_t area;
     lv_obj_get_coords(lv_event_get_target(ev), &area);
-    /* pulse at the measured rate; shimmer when no lock */
+    /* pulse at the measured rate; shimmer when no lock; a held (stale)
+       reading gets a still, grey heart: it's not being measured now */
     int rate = sensors_bpm();
+    int stale = rate > 0 && sensors_bpm_stale();
     int lit;
-    if (rate > 0) {
+    if (stale) {
+        lit = 0;
+    } else if (rate > 0) {
         int period = 60000 / rate;
         lit = (int)(frame_ms % (uint32_t)period) < 220;
     } else {
@@ -208,7 +232,7 @@ static void heart_draw(lv_event_t *ev)
     }
     lv_draw_fill_dsc_t fill;
     lv_draw_fill_dsc_init(&fill);
-    fill.color = lv_color_hex(lit ? 0xFF9898 : 0xE63C3C);
+    fill.color = lv_color_hex(stale ? BPM_STALE_RGB : lit ? 0xFF9898 : 0xE63C3C);
     for (int y = 0; y < 6; y++)
         for (int x = 0; x < 7; x++) {
             if (shape[y][x] != 'X') continue;
@@ -549,12 +573,7 @@ void ui_face_tick(void)
     char buf[24];
 
     if (is_digital) {
-        int bpm = sensors_bpm();
-        if (bpm != last_bpm) {
-            lv_snprintf(buf, sizeof buf, "%d", bpm > 0 ? bpm : 0);
-            lv_label_set_text(d_lbl_bpm, bpm > 0 ? buf : "--");
-            last_bpm = bpm;
-        }
+        bpm_label(d_lbl_bpm, 0xF0586E);
         int steps = ui_steps();
         if (steps != last_steps) {
             if (steps < 0)
@@ -622,12 +641,7 @@ void ui_face_tick(void)
         return;
     }
 
-    int bpm = sensors_bpm();
-    if (bpm != last_bpm) {
-        lv_snprintf(buf, sizeof buf, "%d", bpm > 0 ? bpm : 0);
-        lv_label_set_text(lbl_bpm, bpm > 0 ? buf : "--");
-        last_bpm = bpm;
-    }
+    bpm_label(lbl_bpm, 0xD8E0EC);
     int steps = ui_steps();
     if (steps != last_steps) {
         lv_snprintf(buf, sizeof buf, "%d", steps >= 0 ? steps : 0);

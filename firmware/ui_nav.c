@@ -25,6 +25,8 @@ int sensors_bma_z(void);
 int sensors_hrs_ok(void);
 int sensors_steps(void);
 int sensors_bpm(void);
+int sensors_bpm_stale(void);   /* 1 = held last reading, show greyed */
+#define BPM_STALE_RGB 0x5C6678
 int hal_clock_hour(void);
 int hal_clock_minute(void);
 void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s);
@@ -2068,7 +2070,8 @@ static void st_value(int i, char *v, char *u)
         lv_snprintf(v, 16, "%s", bpm > 0 ? "" : "--");
         if (bpm > 0)
             lv_snprintf(v, 16, "%d", bpm);
-        lv_snprintf(u, 12, "%s", bpm > 0 ? "BPM" : "NO SIGNAL");
+        lv_snprintf(u, 12, "%s", bpm <= 0 ? "NO SIGNAL"
+                                 : sensors_bpm_stale() ? "LAST BPM" : "BPM");
         break;
     case 2:
         lv_snprintf(v, 16, "%s", resting_bpm ? "" : "--");
@@ -2337,8 +2340,10 @@ static void build_notif(lv_obj_t *r)
         }
         lv_obj_set_ext_click_area(
             mk_btn(r, "<", 12, 10, 36, 26, C_FILL, notif_back_cb), 8);
-        mk_label(r, &kenney12, C_MUTED, 56, 16,
-                 v->app[0] ? v->app : "NOTIFICATION");
+        lv_obj_t *an = mk_label(r, &kenney12, C_MUTED, 56, 16,
+                                v->app[0] ? v->app : "NOTIFICATION");
+        lv_obj_set_width(an, 168);       /* app names run to 19 chars */
+        lv_label_set_long_mode(an, LV_LABEL_LONG_DOT);
         lv_obj_t *t = mk_label(r, &kenney16, C_WHITE, 16, 44,
                                v->title[0] ? v->title : "(NO TITLE)");
         lv_obj_set_width(t, 208);
@@ -2453,7 +2458,9 @@ static void cardio_draw(lv_event_t *e)
     lv_layer_t *layer = lv_event_get_layer(e);
     int bpm = sensors_bpm();
     int locked = bpm > 0;
-    lv_color_t hc = locked ? lv_color_hex(0xF0586E)
+    int stale = locked && sensors_bpm_stale();
+    lv_color_t hc = stale ? lv_color_hex(BPM_STALE_RGB)
+                  : locked ? lv_color_hex(0xF0586E)
                            : lv_color_hex(0x38425A);
     /* hub hex with the heart glyph; the BPM object prints inside */
     hex_stroke(layer, 120, 92, 44, hc, 2);
@@ -2461,8 +2468,9 @@ static void cardio_draw(lv_event_t *e)
     if (!locked) {
         draw_glyph(layer, G_CARDIO, 120, 92, 14, hc);
     } else {
+        /* held reading: grey hub + number, LAST instead of BPM */
         draw_txt_c(layer, &kenney12, lv_color_hex(0x8A94A8), 120, 118,
-                   "BPM");
+                   stale ? "LAST" : "BPM");
     }
     /* satellites: zone left, resting right */
     char z[4];
@@ -2514,8 +2522,10 @@ static void build_cardio(lv_obj_t *r)
         lv_snprintf(buf, sizeof buf, "%d", bpm);
     else
         buf[0] = 0;
-    cardio_bpm = mk_label_c(r, &kenney56, lv_color_hex(0xF0586E), 120, 60,
-                            buf);
+    cardio_bpm = mk_label_c(r, &kenney56,
+                            lv_color_hex(bpm > 0 && sensors_bpm_stale()
+                                         ? BPM_STALE_RGB : 0xF0586E),
+                            120, 60, buf);
 
     /* full-width live PPG — the real optical signal, orange per concept */
     lv_obj_t *t = lv_obj_create(r);
@@ -2727,7 +2737,8 @@ void ui_tick(void)
     /* resting HR = lowest reading this session outside workouts */
     {
         int b = sensors_bpm();
-        if (b > 0 && !w_active && (resting_bpm == 0 || b < resting_bpm))
+        if (b > 0 && !sensors_bpm_stale() && !w_active &&
+            (resting_bpm == 0 || b < resting_bpm))
             resting_bpm = b;
     }
     /* alarm: once per matching minute, buzz in 500 ms pulses until STOP */
@@ -2798,11 +2809,13 @@ void ui_tick(void)
             }
         }
         {
-            static int last_bpm = -2;
+            static int last_key = -4;
             int bpm = sensors_bpm();
-            if (bpm != last_bpm) {
-                int was_locked = last_bpm > 0;
-                last_bpm = bpm;
+            int stale = bpm > 0 && sensors_bpm_stale();
+            int key = bpm * 2 + stale;       /* held flips the colour */
+            if (key != last_key) {
+                int was_locked = last_key > 0;
+                last_key = key;
                 if (cardio_art)
                     lv_obj_invalidate(cardio_art);  /* zone + hub tint */
                 if ((bpm > 0) != was_locked) {
@@ -2811,6 +2824,8 @@ void ui_tick(void)
                     char buf[16];
                     lv_snprintf(buf, sizeof buf, "%d", bpm);
                     lv_label_set_text(cardio_bpm, buf);
+                    lv_obj_set_style_text_color(cardio_bpm,
+                        lv_color_hex(stale ? BPM_STALE_RGB : 0xF0586E), 0);
                 }
             }
         }

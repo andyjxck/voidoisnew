@@ -37,7 +37,7 @@ static uint32_t fake_mmio[0x4000];
 
 /* ---- framebuffer ---- */
 static uint16_t fb[240 * 240];
-static uint16_t buf[240 * 40];
+static uint16_t buf[240 * VOIDOS_DRAW_BUF_LINES];   /* same strip as the watch */
 
 static void flush(lv_display_t *d, const lv_area_t *a, uint8_t *px)
 {
@@ -210,6 +210,8 @@ static void canvas_audit(int (*hit)(int, int), int n, int hub,
     }
 }
 
+static unsigned heap_peak, heap_total;
+
 static void shot(const char *dir, scr_t s, const char *name)
 {
     cur_name = name;
@@ -238,6 +240,24 @@ static void shot(const char *dir, scr_t s, const char *name)
     fprintf(audit, "LVGL heap: used %u%% max_used %u free_biggest %u\n",
             (unsigned)m.used_pct, (unsigned)m.max_used, (unsigned)m.free_biggest_size);
     fclose(audit);
+    /* heap.txt: live use after the shot and the running peak; a shot
+       that raises the peak is the one that set it */
+    static FILE *heap;
+    static unsigned peak;
+    if (!heap) {
+        snprintf(path, sizeof path, "%s/heap.txt", dir);
+        heap = fopen(path, "w");
+        fprintf(heap, "LV_MEM_SIZE %u, pool %u B usable\n",
+                (unsigned)LV_MEM_SIZE, (unsigned)m.total_size);
+    }
+    unsigned used = (unsigned)(m.total_size - m.free_size);
+    fprintf(heap, "%-30s now %5u peak %5u%s\n", name, used,
+            (unsigned)m.max_used, m.max_used > peak ? "  <- new peak" : "");
+    if (m.max_used > peak)
+        peak = m.max_used;
+    fflush(heap);
+    heap_peak = peak;
+    heap_total = (unsigned)m.total_size;
 }
 
 int main(int argc, char **argv)
@@ -265,6 +285,9 @@ int main(int argc, char **argv)
     taps = fopen(tp, "w");
     shot(dir, SCR_FACE, "00_face");
     face_dig = 0; shot(dir, SCR_FACE, "01_face_analog"); face_dig = 1;
+    snap_stale = 1; shot(dir, SCR_FACE, "08_face_bpm_held");
+    face_dig = 0; shot(dir, SCR_FACE, "09_face_analog_bpm_held"); face_dig = 1;
+    snap_stale = 0;
     snap_bpm = 0; shot(dir, SCR_FACE, "02_face_measuring");
     snap_hr_on = 0; shot(dir, SCR_FACE, "03_face_hr_off");
     snap_hr_on = 1; snap_bpm = 72;
@@ -340,12 +363,21 @@ int main(int argc, char **argv)
     shot(dir, SCR_SETTIME, "23_settime");
     shot(dir, SCR_NOTIF, "24_notif");
     notif_sel_uid = 100; shot(dir, SCR_NOTIF, "25_notif_open");
+    /* worst case the phone can send: 4 notifications, every field full */
+    snap_notif_stress = 1; notif_sel_uid = 0;
+    shot(dir, SCR_NOTIF, "24_notif_full");
+    notif_sel_uid = 200; shot(dir, SCR_NOTIF, "25_notif_open_long");
+    notif_sel_uid = 0; snap_notif_stress = 0;
     notif_sel_uid = 0;
     shot(dir, SCR_CARDIO, "26_cardio");
+    snap_stale = 1; shot(dir, SCR_CARDIO, "26_cardio_bpm_held");
+    shot(dir, SCR_STATS, "22_stats_bpm_held"); snap_stale = 0;
     shot(dir, SCR_DIAG, "27_diag");
     cur_name = "";
     printf("wrote screens to %s; tap/text audit: %d checks, %d failed\n",
            dir, checks, fails);
+    printf("LVGL heap: peak %u B of %u B usable (LV_MEM_SIZE %u)\n",
+           heap_peak, heap_total, (unsigned)LV_MEM_SIZE);
     if (taps) {
         fprintf(taps, "%d checks, %d failed\n", checks, fails);
         fclose(taps);

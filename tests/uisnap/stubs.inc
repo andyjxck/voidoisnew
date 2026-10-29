@@ -1,5 +1,5 @@
 static uint32_t now_ms = 100000;
-static int snap_bpm = 72, snap_hr_on = 1;
+static int snap_bpm = 72, snap_hr_on = 1, snap_stale = 0;
 uint32_t hal_millis_raw(void) { return now_ms; }
 uint32_t hal_millis(void) { return now_ms; }
 void fault_blink(int p) { fprintf(stderr, "LVGL assert (fault_blink %d)\n", p); abort(); }
@@ -12,6 +12,7 @@ int sensors_bma_z(void) { return 900; }
 int sensors_hrs_ok(void) { return 1; }
 int sensors_steps(void) { return 6420; }
 int sensors_bpm(void) { return snap_hr_on ? snap_bpm : 0; }
+int sensors_bpm_stale(void) { return snap_hr_on && snap_bpm > 0 && snap_stale; }
 int sensors_hr_on(void) { return snap_hr_on; }
 void sensors_hr_set(int on) { snap_hr_on = on; }
 int sensors_wrist_raise(void) { return 0; }
@@ -61,7 +62,8 @@ int ancs_cts_state(void) { return 0; }
 int ancs_sub_fail(void) { return 0; }
 int ancs_ready(void) { return 1; }
 int ancs_state(void) { return 3; }
-int ancs_count(void) { return 3; }
+static int snap_notif_stress;   /* 4 notifications, every field full */
+int ancs_count(void) { return snap_notif_stress ? 4 : 3; }
 int ancs_take_dirty(void) { return 0; }
 int ancs_take_new(void) { return 0; }
 void ancs_dismiss(uint32_t u) { (void)u; }
@@ -73,6 +75,19 @@ const struct ancs_notif_view *ancs_get(int i)
         {101, 0, 0, 1, "Mail", "GitHub", "[voidoisnew] PR opened: fix heart rate", 80000},
         {102, 0, 0, 1, "Calendar", "Standup", "10:00 AM - 10:15 AM", 50000},
     };
+    /* ancs.c limits: 4 notifications, app 19 / title 47 / msg 95 chars */
+    static struct ancs_notif_view w[4] = {
+        {200, 0, 1, 1, "Messages Messages M", "Samantha Wellington-Brown and seven other peop",
+         "are we still on for tonight? I can bring food if you want, or we could order in. Let me know!!", 99000},
+        {201, 0, 1, 1, "WhatsApp WhatsApp W", "Family group chat with a very long name indeed",
+         "Mum: did everyone see the photos from the weekend? I put them all in the shared album for you", 90000},
+        {202, 0, 1, 1, "Mail Mail Mail Mail", "[voidoisnew] Pull request opened: fix heart ra",
+         "andyjxck wants to merge 12 commits into main from voidos-2.2: steadier heart rate and free RAM", 80000},
+        {203, 0, 1, 1, "Calendar Calendar C", "Standup with the whole team and the stakehold",
+         "10:00 AM - 10:15 AM, Meeting room 4 on the second floor, bring the release notes and laptop", 50000},
+    };
+    if (snap_notif_stress)
+        return (i >= 0 && i < 4) ? &w[i] : NULL;
     return (i >= 0 && i < 3) ? &n[i] : NULL;
 }
 

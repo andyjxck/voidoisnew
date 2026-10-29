@@ -14,8 +14,14 @@ void ui_wake(void);
 void ui_activity(void);
 int ui_swipe(int cst_dir, int start_x);
 
-/* partial-render buffer: LVGL renders into this, we push it to the LCD */
-static uint16_t draw_buf[240 * 32];
+/* partial-render buffer: LVGL renders into this, we push it to the LCD.
+   2.2: 16 lines (7.5 KB) instead of 32. The flush is synchronous and
+   display_send() chunks every strip into 240-byte SPIM DMA transfers
+   from RAM, so strip height doesn't matter to it; a full screen is just
+   15 window+push rounds instead of 8. Simple layers are clipped to the
+   strip too, so they shrink with it. */
+static uint16_t draw_buf[VOIDOS_WIDTH * VOIDOS_DRAW_BUF_LINES]
+    __attribute__((aligned(4)));
 
 unsigned lvgl_flushes;
 uint32_t hal_millis(void);

@@ -8,6 +8,9 @@ LVGL_OBJS := $(patsubst $(FW)/%.c,$(OBJDIR)/%.o,$(LVGL_SRC))
 snap: snap.c $(FW)/ui_nav.c $(FW)/ui_face.c $(LVGL_OBJS) $(OBJDIR)/gen/kenney_lvgl.o $(OBJDIR)/gen/assets_data.o
 	$(CC) $(CFLAGS) -m32 -o $@ snap.c $(FW)/ui_face.c $(LVGL_OBJS) $(OBJDIR)/gen/kenney_lvgl.o $(OBJDIR)/gen/assets_data.o -lm
 
+# every LVGL object depends on its config (strip height, heap size)
+$(LVGL_OBJS): $(FW)/lv_conf.h
+
 $(OBJDIR)/%.o: $(FW)/%.c
 	@mkdir -p $(dir $@)
 	@$(CC) $(CFLAGS) -c -o $@ $<

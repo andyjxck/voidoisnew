@@ -69,7 +69,19 @@
 
 #if LV_USE_STDLIB_MALLOC == LV_STDLIB_BUILTIN
     /** Size of memory available for `lv_malloc()` in bytes (>= 2kB) */
-    #define LV_MEM_SIZE (20 * 1024U)          /**< [bytes] */
+    /* VoidOS 2.2: sized from measurement, not a guess. The host renderer
+       (tests/uisnap, same config, 32-bit, same 16-line strip) walks every
+       screen and state incl. torch, water lock, music, weather and 4
+       full-length notifications: peak live use 9880 B, and `make
+       heapcheck` finds 12032 B the smallest pool (with TLSF overhead)
+       that renders all of them pixel-identically. 16 KB leaves 4.3 KB
+       (36%) over that; a failed lv_malloc halts the watch, so no tighter.
+       Was 20 KB. The host renderer can override it to sweep sizes. */
+    #ifdef VOIDOS_LV_MEM_SIZE
+    #define LV_MEM_SIZE VOIDOS_LV_MEM_SIZE
+    #else
+    #define LV_MEM_SIZE (16 * 1024U)          /**< [bytes] */
+    #endif
 
     /** Size of the memory expand for `lv_malloc()` in bytes */
     #define LV_MEM_POOL_EXPAND_SIZE 0
@@ -143,7 +155,15 @@
  * and can't be drawn in chunks. */
 
 /** The target buffer size for simple layer chunks. */
-#define LV_DRAW_LAYER_SIMPLE_BUF_SIZE    (8 * 1024)   /* must fit in LV_MEM_SIZE */    /**< [bytes]*/
+/* VoidOS: lines in the one partial-render buffer (lvgl_port.c, and the
+   host renderer uses the same so its heap numbers match the watch) */
+#define VOIDOS_DRAW_BUF_LINES 16
+
+/* VoidOS 2.2: no screen uses a layer (no opa_layered, transform, blend
+   mode or bitmap mask), so this is only a cap, never allocated. Kept
+   well under the trimmed LV_MEM_SIZE: if a layer ever appears it's
+   rendered in 4 KB chunks (4 ARGB lines of the 16-line strip). */
+#define LV_DRAW_LAYER_SIMPLE_BUF_SIZE    (4 * 1024)   /* must fit in LV_MEM_SIZE */    /**< [bytes]*/
 
 /* Limit the max allocated memory for simple and transformed layers.
  * It should be at least `LV_DRAW_LAYER_SIMPLE_BUF_SIZE` sized but if transformed layers are also used
