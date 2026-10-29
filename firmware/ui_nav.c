@@ -6,6 +6,8 @@
 #include "lvgl.h"
 #include "voidos/hal.h"
 #include "board.h"
+#include "ui_deco.h"
+#include "phone.h"
 
 #ifndef VOIDOS_VERSION
 #define VOIDOS_VERSION "dev"     /* the firmware Makefile passes VERSION */
@@ -36,7 +38,7 @@ extern const lv_font_t kenney9, kenney12, kenney16, kenney24, kenney56;
 typedef enum {
     SCR_FACE, SCR_LAUNCHER, SCR_CC, SCR_WORKOUT, SCR_W_RUN, SCR_W_DONE,
     SCR_SLEEP, SCR_S_DONE, SCR_WATER, SCR_CLOCK, SCR_SETTINGS, SCR_STATS,
-    SCR_SETTIME, SCR_NOTIF, SCR_CARDIO, SCR_DIAG
+    SCR_SETTIME, SCR_NOTIF, SCR_CARDIO, SCR_DIAG, SCR_WEATHER, SCR_MUSIC
 } scr_t;
 
 static scr_t cur = SCR_FACE;
@@ -96,9 +98,9 @@ static scr_t back_target = SCR_FACE;
 /* the clock came from the last save, not the phone: it is behind by
    however long the watch was off or flashing. The face says so until a
    phone sync or a manual SET TIME. */
-static int clock_stale;
-int clock_syncs_seen(void);
-int ui_clock_stale(void) { return clock_stale && !clock_syncs_seen(); }
+int hal_clock_restored(void);
+void hal_clock_restore(int y, int mo, int d, int dow, int h, int mi, int s);
+int ui_clock_stale(void) { return hal_clock_restored(); }
 
 /* ---- persistence: settings + step history on external SPI flash ---- */
 void spi_flash_init(void);
@@ -200,7 +202,7 @@ static void persist_save(void)
         P.steps_total = (uint32_t)ui_steps();
         P.chip_at_save = (uint32_t)sensors_steps();
     }
-    if (hal_clock_synced()) {
+    if (hal_clock_synced() || hal_clock_restored()) {
         int y, mo, d, dow;
         hal_clock_date(&y, &mo, &d, &dow);
         P.clock_tod_ms = hal_clock_tod_ms();
@@ -255,10 +257,9 @@ static void persist_load(void)
        this boot; the phone will correct it on the next sync */
     if (P.clock_ok && P.clock_year >= 2024 && !hal_clock_synced()) {
         uint32_t t = P.clock_tod_ms;
-        hal_clock_set(P.clock_year, P.clock_mon, P.clock_day, P.clock_dow,
-                      (int)(t / 3600000u), (int)(t / 60000u % 60u),
-                      (int)(t / 1000u % 60u));
-        clock_stale = 1;
+        hal_clock_restore(P.clock_year, P.clock_mon, P.clock_day,
+                          P.clock_dow, (int)(t / 3600000u),
+                          (int)(t / 60000u % 60u), (int)(t / 1000u % 60u));
     }
 }
 
@@ -609,7 +610,8 @@ static void icon_dsc_init(void)
 enum {
     G_WORKOUT, G_CARDIO, G_STATS, G_SLEEP, G_WATER, G_CLOCK,
     G_ALERTS, G_SETTINGS, G_DIAG, G_PHONE,
-    G_BATT, G_SUN, G_BT, G_PLANE, G_TORCH, G_STEPS, G_BOLT
+    G_BATT, G_SUN, G_BT, G_PLANE, G_TORCH, G_STEPS, G_BOLT,
+    G_WEATHER, G_MUSIC
 };
 static void hex_stroke(lv_layer_t *layer, int cx, int cy, int r,
                        lv_color_t c, int w);
@@ -925,6 +927,12 @@ static void draw_glyph(lv_layer_t *layer, int g, int cx, int cy, int s,
     rc.bg_opa = LV_OPA_COVER;
     rc.bg_color = c;
     switch (g) {
+    case G_WEATHER:                        /* sun behind a cloud */
+        dk_wx_icon(layer, 1, cx, cy, s, c);
+        break;
+    case G_MUSIC:
+        dk_music(layer, DK_M_NOTE, cx, cy, s, c);
+        break;
     case G_WORKOUT: {                      /* dumbbell */
         lv_area_t p1 = {cx - s, cy - s / 2, cx - s + 3, cy + s / 2};
         lv_area_t p2 = {cx - s + 5, cy - s + 2, cx - s + 7, cy + s - 2};
@@ -1232,7 +1240,7 @@ static void build_cc(lv_obj_t *r)
    hex node joined to the hub by a thin trace. Drag sideways to move
    focus; tap the hub or any node to open that app. One canvas draws
    everything; input runs on the canvas object. */
-#define LC_N 8
+#define LC_N 9
 static const struct {
     const char *name;
     scr_t scr;
@@ -1245,6 +1253,7 @@ static const struct {
     {"SLEEP",    SCR_SLEEP,    G_SLEEP,    LV_COLOR_MAKE(0xB0, 0x6C, 0xF0)},
     {"WATER",    SCR_WATER,    G_WATER,    LV_COLOR_MAKE(0x40, 0xB0, 0xF0)},
     {"CLOCK",    SCR_CLOCK,    G_CLOCK,    LV_COLOR_MAKE(0xF0, 0xD0, 0x40)},
+    {"WEATHER",  SCR_WEATHER,  G_WEATHER,  LV_COLOR_MAKE(0x46, 0xD8, 0xE0)},
     {"ALERTS",   SCR_NOTIF,    G_ALERTS,   LV_COLOR_MAKE(0x50, 0xE0, 0x78)},
     {"SETTINGS", SCR_SETTINGS, G_SETTINGS, LV_COLOR_MAKE(0x8A, 0x94, 0xA8)},
 };
@@ -1267,7 +1276,7 @@ static int lc_dx, lc_drag_dist;
 #define LC_SAT_HIT 34
 static void lc_pos(int i, int *x, int *y)
 {
-    float a = (-90.0f + i * 45.0f) * 0.0174533f;
+    float a = (-90.0f + i * (360.0f / LC_N)) * 0.0174533f;
     *x = 120 + (int)(cosf(a) * 92);
     *y = LC_CY + (int)(sinf(a) * 84);
 }
@@ -1745,7 +1754,7 @@ static void diag_open_cb(lv_event_t *e);
    was a 60x15 pill per row), swipe up/down to page. Nothing here
    scrolls, in keeping with the 1.6.2 no-scroll rule; paging rides the
    same hardware gesture path the rest of the OS uses. */
-#define SET_ROWS     13
+#define SET_ROWS     14
 #define SET_PER_PAGE 5
 
 static lv_obj_t *mk_row(lv_obj_t *r, int y, const char *name,
@@ -1783,18 +1792,19 @@ static void build_settings(lv_obj_t *r)
                     (SET_ROWS + SET_PER_PAGE - 1) / SET_PER_PAGE);
         mk_header(r, tt, 1);
     }
-    static const char *rows[12] = {
+    static const char *rows[13] = {
         "DND", "AIRPLANE", "BLUETOOTH", "TORCH", "WATER LOCK",
-        "BRIGHTNESS", "CC TORCH", "CC WATER", "CC PHONE",
-        "SET TIME", "FACE", "HEART RATE"
+        "BRIGHTNESS", "CC TORCH", "CC WATER", "CC ALERTS",
+        "SET TIME", "FACE", "HEART RATE", "INFINILINK"
     };
-    int vals[12] = {dnd_on, airplane_on, bt_on, torch_on, water_lock,
+    int vals[13] = {dnd_on, airplane_on, bt_on, torch_on, water_lock,
                     brightness, !(cc_hide & 1), !(cc_hide & 2),
-                    !(cc_hide & 4), 1, face_dig, sensors_hr_on()};
+                    !(cc_hide & 4), 1, face_dig, sensors_hr_on(),
+                    ble_get_compat()};
     int first = set_page * SET_PER_PAGE;
     for (int i = first; i < SET_ROWS && i < first + SET_PER_PAGE; i++) {
         int y = 42 + (i - first) * 36;
-        if (i == 12) {
+        if (i == 13) {
             static const char *bs[5] = {"OFF", "START", "ON", "LINK",
                                         "RETRY"};
             int st = ble_status();
@@ -1911,6 +1921,7 @@ static void settings_cb(lv_event_t *e)
         return;
     case 10: face_dig ^= 1; break;
     case 11: sensors_hr_set(!sensors_hr_on()); break;
+    case 12: ble_set_compat(!ble_get_compat()); break;
     }
     rebuild();
     persist_mark();
@@ -2501,6 +2512,8 @@ static void build_diag(lv_obj_t *r)
 
 /* ---- dispatch ------------------------------------------------------------------ */
 
+#include "ui_phone.inc"
+
 static void rebuild(void)
 {
     ui_face_breath_stop();   /* anim must die before its label does */
@@ -2511,6 +2524,7 @@ static void rebuild(void)
     cardio_art = NULL;
     diag_lbl = NULL;
     lc_canvas = NULL;
+    mus_art = mus_pos_lbl = NULL;
     switch (cur) {
     case SCR_FACE:      ui_face_build(root); break;
     case SCR_LAUNCHER:  build_launcher(root); break;
@@ -2528,6 +2542,8 @@ static void rebuild(void)
     case SCR_NOTIF:     build_notif(root); break;
     case SCR_CARDIO:    build_cardio(root); break;
     case SCR_DIAG:      build_diag(root); break;
+    case SCR_WEATHER:   build_weather(root); break;
+    case SCR_MUSIC:     build_music(root); break;
     }
 }
 
@@ -2588,7 +2604,7 @@ void ui_tick(void)
             ui_wake();
         else if (water_lock) {
             /* the button is the way out of water lock */
-            water_lock = 0;
+            wlock_set(0);
             hal_motor(1);
             motor_off_at = now + 120;
             rebuild();
@@ -2603,6 +2619,7 @@ void ui_tick(void)
     }
     was_held = held != 0;
     sensors_tick(now);
+    overlay_tick(now);
     if (timer_end_ms && now >= timer_end_ms) {
         timer_end_ms = 0;
         timer_done = 1;
@@ -2633,7 +2650,8 @@ void ui_tick(void)
             resting_bpm = b;
     }
     /* alarm: once per matching minute, buzz in 500 ms pulses until STOP */
-    if (alarm_on && hal_clock_synced()) {
+    /* a restored clock rings too: a late alarm beats a missed one */
+    if (alarm_on && (hal_clock_synced() || hal_clock_restored())) {
         int mod = hal_clock_hour() * 60 + hal_clock_minute();
         if (mod == alarm_h * 60 + alarm_m && alarm_fired_min != mod) {
             alarm_fired_min = mod;
@@ -2657,6 +2675,13 @@ void ui_tick(void)
     switch (cur) {
     case SCR_FACE:
         ui_face_tick();
+        break;
+    case SCR_MUSIC:
+        music_tick();
+        break;
+    case SCR_WEATHER:
+        if (phone_take_dirty())
+            rebuild();
         break;
     case SCR_LAUNCHER:
         lc_tick();

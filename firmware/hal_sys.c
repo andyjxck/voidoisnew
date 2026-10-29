@@ -130,7 +130,12 @@ int hal_clock_hour(void)   { return (int)(wall_ms() / 3600000u); }
 int hal_clock_minute(void) { return (int)(wall_ms() / 60000u % 60u); }
 int hal_clock_second(void) { return (int)(wall_ms() / 1000u % 60u); }
 int hal_clock_millis(void) { return (int)(wall_ms() % 1000u); }
-int hal_clock_synced(void) { return clock_valid; }
+/* clock_valid: 0 never set, 1 set by the phone or SET TIME this boot,
+   2 restored from the last save. A restored clock is behind by however
+   long the watch was off or being flashed, so it is NOT "synced": the
+   face shows it as pending and alarms wait for a real sync. */
+int hal_clock_synced(void) { return clock_valid == 1; }
+int hal_clock_restored(void) { return clock_valid == 2; }
 uint32_t hal_clock_tod_ms(void) { return wall_ms(); }
 
 void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s)
@@ -146,6 +151,16 @@ void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s)
     clock_day = (uint8_t)d;
     clock_dow = (uint8_t)dow;
     clock_valid = 1;
+}
+
+/* last saved wall clock, after a reboot or a flash: shown as a rough
+   time, never trusted (see hal_clock_synced) */
+void hal_clock_restore(int y, int mo, int d, int dow, int h, int mi, int s)
+{
+    if (clock_valid == 1)
+        return;
+    hal_clock_set(y, mo, d, dow, h, mi, s);
+    clock_valid = 2;
 }
 
 /* Sakamoto's algorithm: weekday from Y/M/D, returns 1=Mon .. 7=Sun.

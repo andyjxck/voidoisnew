@@ -231,8 +231,6 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font,
     return obj;
 }
 
-}
-
 /* ---- digital face, 2.1 layout ------------------------------------------
    y   8..49   weather chip (left, tap -> weather)   date block (right)
    y  54..117  big time

@@ -35,7 +35,9 @@ void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s)
 { (void)y; (void)mo; (void)d; (void)dow; (void)h; (void)mi; (void)s; }
 void hal_clock_date(int *y, int *mo, int *d, int *dow)
 { *y = 2026; *mo = 10; *d = 28; *dow = 3; }
-int hal_clock_synced(void) { return 1; }
+static int snap_synced = 1, snap_restored;
+int hal_clock_synced(void) { return snap_synced; }
+int hal_clock_restored(void) { return snap_restored; }
 uint32_t hal_clock_tod_ms(void) { return 30 * 60000; }
 int hal_battery_pct(void) { return 81; }
 int hal_battery_raw(void) { return 3300; }
@@ -70,3 +72,33 @@ const struct ancs_notif_view *ancs_get(int i)
     };
     return (i >= 0 && i < 3) ? &n[i] : NULL;
 }
+
+/* phone-fed data (weather + music), switchable per shot */
+static int snap_compat;
+void ble_set_compat(int on) { snap_compat = on; }
+int ble_get_compat(void) { return snap_compat; }
+static struct wx snap_wx_data = {
+    .temp = 1840, .tmin = 1120, .tmax = 2150, .icon = WX_FEWCLOUDS,
+    .city = "Redditch", .rx_ms = 100000 - 12 * 60000, .ndays = 5,
+    .day = {{1120, 2150, WX_FEWCLOUDS}, {980, 1760, WX_RAIN},
+            {870, 1490, WX_SHOWERS}, {640, 1310, WX_CLOUDS},
+            {720, 1580, WX_SUN}}};
+static int snap_wx_on = 1;
+const struct wx *wx_get(void) { return snap_wx_on ? &snap_wx_data : NULL; }
+const char *wx_name(int icon)
+{
+    static const char *n[WX_N] = {"CLEAR", "FEW CLOUDS", "CLOUDY",
+                                  "OVERCAST", "SHOWERS", "RAIN",
+                                  "THUNDER", "SNOW", "MIST"};
+    return icon >= 0 && icon < WX_N ? n[icon] : "--";
+}
+static struct music snap_music_data = {
+    .playing = 1, .src = MS_SRC_AMS, .artist = "Daft Punk",
+    .track = "Digital Love", .album = "Discovery",
+    .pos_s = 97, .len_s = 301, .pos_ms = 100000};
+const struct music *music_get(void) { return &snap_music_data; }
+int music_active(void) { return snap_music_data.playing && ble_connected(); }
+void music_cmd(int c) { (void)c; }
+int music_vol_ok(void) { return 1; }
+int phone_take_dirty(void) { return 0; }
+int phone_take_face_dirty(void) { return 0; }

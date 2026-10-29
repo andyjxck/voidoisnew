@@ -56,6 +56,8 @@ static uint16_t h_ns_val, h_ns_cccd, h_ds_val, h_ds_cccd, h_cp_val;
 static uint32_t disc_retry_at;
 static int cts_state;               /* 0 idle 1 disc 2 read 3 synced */
 static uint32_t cts_pending_at;
+static int sub_inflight;            /* a CCCD write awaits its callback */
+static uint32_t cts_ok_at;          /* when the clock last synced */
 
 /* Data Source responses can fragment across notifications; accumulate */
 static uint8_t ds_buf[320];
@@ -262,6 +264,7 @@ static int ds_sub_done(uint16_t conn, const struct ble_gatt_error *err,
                        struct ble_gatt_attr *attr, void *arg)
 {
     (void)conn; (void)attr; (void)arg;
+    sub_inflight = 0;
     if (err->status == 0) {
         state = ST_LIVE;
         notif_dirty = 1;
@@ -277,13 +280,15 @@ static void subscribe_ns(void)
 {
     uint8_t on[2] = {1, 0};
     state = ST_SUB_NS;
-    ble_gattc_write_flat(a_conn, h_ns_cccd, on, 2, sub_done, NULL);
+    sub_inflight = ble_gattc_write_flat(a_conn, h_ns_cccd, on, 2,
+                                        sub_done, NULL) == 0;
 }
 
 static int sub_done(uint16_t conn, const struct ble_gatt_error *err,
                     struct ble_gatt_attr *attr, void *arg)
 {
     (void)conn; (void)attr; (void)arg;
+    sub_inflight = 0;
     if (err->status != 0) {
         /* 0x05/0x0F = not yet paired/encrypted: iOS pairs us now and
            ENC_CHANGE re-arms the subscribe; anything else -> retry */
@@ -294,7 +299,8 @@ static int sub_done(uint16_t conn, const struct ble_gatt_error *err,
     state = ST_SUB_DS;
     uint8_t on[2] = {1, 0};
     if (h_ds_cccd)
-        ble_gattc_write_flat(a_conn, h_ds_cccd, on, 2, ds_sub_done, NULL);
+        sub_inflight = ble_gattc_write_flat(a_conn, h_ds_cccd, on, 2,
+                                            ds_sub_done, NULL) == 0;
     else
         state = ST_LIVE;
     return 0;
@@ -389,14 +395,19 @@ void ancs_on_connect(uint16_t conn)
 {
     a_conn = conn;
     state = ST_IDLE;
+    sub_inflight = 0;
     cts_state = 0;
-    cts_pending_at = 0;
+    /* ask for the time on every connect, whatever ANCS does. On an
+       unencrypted link iOS refuses the read; the 10 s retry and
+       ancs_on_enc_ok then try again once pairing is done */
+    cts_pending_at = hal_millis() + 2500;
 }
 
 void ancs_on_disconnect(void)
 {
     a_conn = 0;
     state = ST_IDLE;
+    sub_inflight = 0;
     cts_state = 0;
     cts_pending_at = 0;
     notif_count = 0;
@@ -434,12 +445,12 @@ int ams_busy(void);
    date, "FRI, OCT 24") */
 static int client_quiet(void)
 {
-    if (ams_busy())
+    if (ams_busy() || sub_inflight)
         return 0;
     if (state == ST_LIVE || state == ST_IDLE)
         return 1;
-    return state == ST_SUB_NS && disc_retry_at &&
-           (int32_t)(disc_retry_at - hal_millis()) > 4000;
+    /* parked between resubscribe attempts: nothing on the wire */
+    return state == ST_SUB_NS;
 }
 int ancs_client_idle(void)
 {
@@ -463,6 +474,8 @@ static int cts_read_cb(uint16_t conn, const struct ble_gatt_error *error,
     }
     /* shared validation + weekday computed from the date (ble_svcs.c) */
     cts_state = phone_apply_cts(t, 7) == 0 ? 3 : 0;
+    if (cts_state == 3)
+        cts_ok_at = hal_millis();
     return 0;
 }
 
@@ -526,8 +539,16 @@ void ancs_tick(void)
     }
     if (state > ST_IDLE && state < ST_LIVE && disc_retry_at &&
         hal_millis() > disc_retry_at) {
-        if (ams_busy() || cts_state == 1 || cts_state == 2) {
+        if (ams_busy() || cts_state == 1 || cts_state == 2 ||
+            sub_inflight) {
             disc_retry_at = hal_millis() + 2000;   /* let it finish */
+            return;
+        }
+        /* discovery stalled with the clock still unset: the link is
+           free, so give the time read its turn before starting over */
+        if (state != ST_SUB_NS && cts_state == 0) {
+            disc_retry_at = hal_millis() + 4000;
+            cts_begin();
             return;
         }
         disc_retry_at = hal_millis() + 12000;
@@ -536,6 +557,9 @@ void ancs_tick(void)
         else
             ancs_begin();            /* discovery stalled: start over */
     }
+    /* re-read the phone clock every 6 h on a long-lived link (drift) */
+    if (cts_state == 3 && a_conn && hal_millis() - cts_ok_at > 21600000u)
+        cts_state = 0;
     /* CTS: retry a failed read every 10 s while connected + idle */
     if (cts_state == 0 && !cts_pending_at && a_conn && client_quiet()) {
         static uint32_t cts_last_try;
