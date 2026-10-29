@@ -31,6 +31,7 @@ static void snap_text(const struct _lv_font_t *f, const char *s, int x, int y,
 static uint32_t fake_mmio[0x4000];
 #define REG32(a) (fake_mmio[((uintptr_t)(a) >> 2) & 0x3FFF])
 #include "../../firmware/ui_nav.c"
+#include "src/misc/lv_event_private.h"
 
 /* ---- hardware stubs ---- */
 #include "stubs.inc"
@@ -541,6 +542,133 @@ static void shot(const char *dir, scr_t s, const char *name)
     heap_total = (unsigned)m.total_size;
 }
 
+
+/* 2.2.3 tap audit: every button on every (non-canvas) screen state is
+   tapped once in the real UI code. A tap must change the screen (pixels,
+   screen id) or the state behind it; a button that does neither is dead.
+   The launcher, control centre and stats grid are canvases with their
+   own hit tables, covered by canvas_audit above. */
+static lv_obj_t *tap_list[64];
+static int tap_n;
+static int is_tap_obj(lv_obj_t *o)
+{
+    if (!lv_obj_has_flag(o, LV_OBJ_FLAG_CLICKABLE))
+        return 0;
+    uint32_t n = lv_obj_get_event_count(o);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_event_dsc_t *d = lv_obj_get_event_dsc(o, i);
+        if (d && d->filter == LV_EVENT_CLICKED && d->cb != tap_filter)
+            return 1;
+    }
+    return 0;
+}
+static void tap_collect(lv_obj_t *o)
+{
+    if (tap_n < 64 && is_tap_obj(o))
+        tap_list[tap_n++] = o;
+    uint32_t c = lv_obj_get_child_count(o);
+    for (uint32_t i = 0; i < c; i++)
+        tap_collect(lv_obj_get_child(o, i));
+}
+static uint32_t tap_fp(void)
+{
+    uint32_t h = 2166136261u;
+    const uint8_t *b = (const uint8_t *)fb;
+    for (size_t i = 0; i < sizeof fb; i++) h = (h ^ b[i]) * 16777619u;
+    int st[] = {cur, nav_sp, sw_running, (int)sw_acc, sw_laps, timer_end_ms != 0,
+                (int)timer_left_ms, timer_done, timer_set_min, alarm_on,
+                alarm_h, alarm_m, alarm_ringing, alarm_snooze_mod, clock_tab,
+                set_page, (int)DL.water_ml, w_active, s_in_bed};
+    const uint8_t *q = (const uint8_t *)st;
+    for (size_t i = 0; i < sizeof st; i++) h = (h ^ q[i]) * 16777619u;
+    return h;
+}
+static FILE *tapf;
+static int tap_dead, tap_total;
+static void tap_state(scr_t s, const char *name, int strict)
+{
+    cur = s; rebuild(); settle();
+    tap_n = 0; tap_collect(lv_screen_active());
+    int n = tap_n;
+    for (int i = 0; i < n; i++) {
+        cur = s; rebuild(); settle();
+        tap_n = 0; tap_collect(lv_screen_active());
+        if (i >= tap_n) break;
+        lv_obj_t *o = tap_list[i];
+        const char *txt = "";
+        if (lv_obj_get_child_count(o) &&
+            lv_obj_check_type(lv_obj_get_child(o, 0), &lv_label_class))
+            txt = lv_label_get_text(lv_obj_get_child(o, 0));
+        char t[24]; snprintf(t, sizeof t, "%s", txt);
+        uint32_t a = tap_fp();
+        lv_obj_send_event(o, LV_EVENT_CLICKED, NULL);
+        settle();
+        uint32_t b = tap_fp();
+        tap_total++;
+        int dead = a == b;
+        /* the tab you are already on has nothing to switch to */
+        if (dead && s == SCR_CLOCK &&
+            ((clock_tab == 0 && !strcmp(t, "STOPWATCH")) ||
+             (clock_tab == 1 && !strcmp(t, "TIMER")) ||
+             (clock_tab == 2 && !strcmp(t, "ALARM")))) {
+            fprintf(tapf, "%-22s %-12s ok (current tab)\n", name, t);
+            continue;
+        }
+        if (dead && strict) tap_dead++;
+        fprintf(tapf, "%-22s %-12s %s\n", name, t,
+                dead ? (strict ? "DEAD" : "no visible change (phone command)") : "ok");
+        if (strict)
+            finding(dead, "tap '%s' on %s does something", t, name);
+        while (nav_sp > 1) nav_sp--;
+    }
+}
+static void tap_audit(const char *dir)
+{
+    char path[512];
+    snprintf(path, sizeof path, "%s/tap_audit.txt", dir);
+    tapf = fopen(path, "w");
+    cur_name = "tap";
+    nav_sp = 1;
+    uint32_t now = hal_millis();
+    clock_tab = 0; sw_running = 0; sw_acc = 0; tap_state(SCR_CLOCK, "clock/stopwatch", 1);
+    clock_tab = 0; sw_running = 1; sw_t0 = now; tap_state(SCR_CLOCK, "clock/stopwatch run", 1);
+    sw_running = 0; sw_acc = 0; sw_laps = 0;
+    clock_tab = 1; timer_end_ms = 0; timer_left_ms = 0; timer_done = 0;
+    tap_state(SCR_CLOCK, "clock/timer set", 1);
+    clock_tab = 1; timer_end_ms = now + 60000; tap_state(SCR_CLOCK, "clock/timer run", 1);
+    timer_end_ms = 0; timer_done = 1; ring_start_ms = now;
+    tap_state(SCR_CLOCK, "clock/timer done", 1);
+    timer_done = 0; timer_end_ms = 0; timer_left_ms = 0; ring_start_ms = 0;
+    clock_tab = 2; alarm_ringing = 0; tap_state(SCR_CLOCK, "clock/alarm", 1);
+    clock_tab = 2; alarm_ringing = 1; tap_state(SCR_CLOCK, "clock/alarm ringing", 1);
+    alarm_ringing = 0; hal_motor(0);
+    tap_state(SCR_WATER, "water", 1);
+    w_active = 0; tap_state(SCR_WORKOUT, "workout", 1);
+    w_active = 1; w_start_ms = now; tap_state(SCR_W_RUN, "workout/run", 1);
+    w_active = 0; tap_state(SCR_W_DONE, "workout/done", 1);
+    s_in_bed = 0; tap_state(SCR_SLEEP, "sleep", 1);
+    s_in_bed = 1; s_start_ms = now; tap_state(SCR_SLEEP, "sleep/in bed", 1);
+    s_in_bed = 0; tap_state(SCR_S_DONE, "sleep/done", 1);
+    for (set_page = 0; set_page < 3; set_page++) {
+        char nm[24]; snprintf(nm, sizeof nm, "settings p%d", set_page + 1);
+        int sp = set_page;
+        tap_state(SCR_SETTINGS, nm, 1);
+        set_page = sp;
+    }
+    set_page = 0;
+    tap_state(SCR_SETTIME, "settings/set time", 1);
+    tap_state(SCR_CARDIO, "cardio", 1);
+    tap_state(SCR_NOTIF, "alerts list", 1);
+    notif_sel_uid = 100; tap_state(SCR_NOTIF, "alerts detail", 1);
+    notif_sel_uid = 0;
+    tap_state(SCR_MUSIC, "music", 0);
+    tap_state(SCR_DIAG, "diag", 1);
+    fprintf(tapf, "%d buttons tapped, %d dead\n", tap_total, tap_dead);
+    fclose(tapf);
+    printf("tap audit: %d buttons tapped, %d dead (%s)\n", tap_total, tap_dead, path);
+    cur = SCR_FACE; nav_sp = 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *dir = argc > 1 ? argv[1] : ".";
@@ -716,6 +844,16 @@ int main(int argc, char **argv)
     snap_stale = 1; shot(dir, SCR_CARDIO, "26_cardio_bpm_held");
     shot(dir, SCR_STATS, "22_stats_bpm_held"); snap_stale = 0;
     shot(dir, SCR_DIAG, "27_diag");
+    /* 2.2.3 clock states */
+    clock_tab = 0; sw_laps = 3; sw_lap_last = 61200; sw_running = 1;
+    sw_t0 = now_ms - 183400; shot(dir, SCR_CLOCK, "18_clock_sw_laps");
+    sw_running = 0; sw_laps = 0; sw_acc = 0;
+    clock_tab = 1; timer_left_ms = 154000; shot(dir, SCR_CLOCK, "19_clock_timer_paused");
+    timer_left_ms = 0;
+    clock_tab = 2; alarm_on = 1; alarm_snooze_mod = 7 * 60 + 9;
+    shot(dir, SCR_CLOCK, "20_clock_alarm_snoozed"); alarm_snooze_mod = -1;
+    shot(dir, SCR_CLOCK, "20_clock_alarm_on");
+    tap_audit(dir);
     cur_name = "";
     printf("wrote screens to %s; tap/text audit: %d checks, %d failed\n",
            dir, checks, fails);

@@ -1704,7 +1704,7 @@ static void sleep_cb(lv_event_t *e)
         rebuild();
         return;
     }
-    if (!s_track)
+    if (!s_track && !s_in_bed)  /* 2.2.3: WAKE UP always ends a night */
         return;
     if (s_in_bed) {
         s_last_ms = hal_millis() - s_start_ms;
@@ -1838,40 +1838,48 @@ static void fmt_sw(uint32_t ms, char *out)
         lv_snprintf(out, 16, "%02u:%02u.%u", s / 60, s % 60, t);
 }
 
-static void clock_alarm_text(void)
+static void set_text_c(lv_obj_t *l, int cx, const char *t)
 {
-    char buf[24];
-    if (lbl_clk_val) {
-        lv_snprintf(buf, sizeof buf, "%02d:%02d", alarm_h, alarm_m);
-        lv_label_set_text(lbl_clk_val, buf);
-    }
-    if (!lbl_clk_sub)
+    if (!l)
         return;
+    lv_label_set_text(l, t);
+    lv_obj_update_layout(l);
+    lv_obj_set_x(l, cx - lv_obj_get_width(l) / 2);
+}
+
+/* the line between the minute steppers: when it rings, or why not */
+static void alarm_sub_str(char *buf, int n)
+{
     if (!hal_clock_synced() && !hal_clock_restored()) {
-        lv_label_set_text(lbl_clk_sub, "SET TIME FIRST");
+        lv_snprintf(buf, n, "SET TIME");
     } else if (alarm_snooze_mod >= 0) {
-        lv_snprintf(buf, sizeof buf, "SNOOZED %02d:%02d",
-                    alarm_snooze_mod / 60, alarm_snooze_mod % 60);
-        lv_label_set_text(lbl_clk_sub, buf);
+        lv_snprintf(buf, n, "ZZ %02d:%02d", alarm_snooze_mod / 60,
+                    alarm_snooze_mod % 60);
     } else if (!alarm_on) {
-        lv_label_set_text(lbl_clk_sub, "OFF");
+        lv_snprintf(buf, n, "OFF");
     } else {
         int mod = hal_clock_hour() * 60 + hal_clock_minute();
         int d = (alarm_h * 60 + alarm_m - mod + 1440) % 1440;
         if (d == 0)
             d = 1440;
-        lv_snprintf(buf, sizeof buf, "RINGS IN %dH %02dM", d / 60, d % 60);
-        lv_label_set_text(lbl_clk_sub, buf);
+        lv_snprintf(buf, n, "IN %dH %02dM", d / 60, d % 60);
     }
+}
+
+static void clock_alarm_text(void)
+{
+    char buf[24];
+    lv_snprintf(buf, sizeof buf, "%02d:%02d", alarm_h, alarm_m);
+    set_text_c(lbl_clk_val, 120, buf);
+    alarm_sub_str(buf, sizeof buf);
+    set_text_c(lbl_clk_sub, 120, buf);
 }
 
 static void clock_timer_text(void)
 {
     char buf[16];
-    if (!lbl_clk_val)
-        return;
     lv_snprintf(buf, sizeof buf, "%02d:00", timer_set_min);
-    lv_label_set_text(lbl_clk_val, buf);
+    set_text_c(lbl_clk_val, 120, buf);
 }
 
 static lv_obj_t *clk_btn(lv_obj_t *r, const char *t, int x, int y, int w,
@@ -1951,8 +1959,8 @@ static void build_clock(lv_obj_t *r)
         clk_btn(r, "+1H", 172, 92, 62, 48, C_FILL, 41, 1);
         clk_btn(r, "-1M", 6, 144, 62, 46, C_FILL, 42, 1);
         clk_btn(r, "+1M", 172, 144, 62, 46, C_FILL, 43, 1);
-        lbl_clk_sub = mk_label_c(r, &kenney12, C_MUTED, 120, 167, "");
-        clock_alarm_text();
+        alarm_sub_str(buf, sizeof buf);
+        lbl_clk_sub = mk_label_c(r, &kenney12, C_MUTED, 120, 162, buf);
         lv_obj_t *b = mk_toggle(r, alarm_on ? "ALARM ON" : "ALARM OFF",
                                 6, 196, 228, alarm_on, clock_cb);
         lv_obj_set_height(b, 40);
