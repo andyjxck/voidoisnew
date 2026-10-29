@@ -26,7 +26,8 @@ static uint8_t bma_id, bma_stat, bma_feat;   /* diag: chip id, ASIC status, feat
 static uint32_t steps;
 static int16_t ax, ay, az;
 static int32_t base;            /* gravity baseline, mg */
-static int32_t act_delta;       /* last |mag - base|, for raise-to-wake */
+static int32_t act_delta;       /* last |mag - base|, for raise-to-wake
+                                   and the heart-rate motion gate */
 static int armed = 1;
 static uint32_t last_step_ms;
 
@@ -203,7 +204,24 @@ static void bma_sample(uint32_t now)
    - sampling is a fixed 10 Hz grid matching the sensor's cycle, and
      the analysis is InfiniTime's: detrend + differentiate, EMA
      band-pass, Hann, FFT, 2-frame spectral average, SNR > 3 and
-     DC < 0.5 gates, single-peak search, 20-frame BPM average. */
+     DC < 0.5 gates, single-peak search, 20-frame BPM average.
+
+   2.2 ("only tracks when I'm still"): InfiniTime's HandleSensorData
+   treats ONE sample of ambient light as the watch coming off and wipes
+   everything, and feeds wrist-motion garbage straight into the FFT. On
+   the wrist both happen all the time, so the face kept dropping to a
+   dash and needed a full 6.4 s window to come back. Now:
+   - the last good BPM is held for HR_HOLD_MS after the last fresh
+     spectral peak and reported as stale (greyed) instead of 0;
+   - ambient light only means off-wrist after HR_AMB_OFF_N consecutive
+     samples (1.5 s). Blips up to HR_AMB_PATCH_N samples are bridged
+     with the last good sample; longer ones restart the window without
+     touching the held value;
+   - a lost lock (-1) restarts the estimator but keeps the window and
+     the held value;
+   - while the accelerometer sees the wrist moving, no samples are fed
+     (the window would only hold arm swing); acquisition restarts
+     cleanly once the wrist has been still for HR_STILL_MS. */
 
 #define HRS_REG_ENABLE  0x01
 #define HRS_REG_PDRIVER 0x0C
@@ -268,11 +286,28 @@ static float last_snr;
 static int last_pk_bpm;      /* diag: last frame peak, whether accepted or not */
 static uint32_t next_daq_ms;
 
+#define HR_HOLD_MS     60000u  /* show the last good BPM, greyed, this long */
+#define HR_AMB_OFF_N   15      /* 1.5 s of light in a row = off the wrist */
+#define HR_AMB_PATCH_N 3       /* blips up to 300 ms are bridged */
+#define HR_MOVE_MG     200     /* |accel| swing over gravity that pauses HR */
+#define HR_STILL_MS    2000u   /* quiet time before acquisition resumes */
+#define HR_ALS_FLOOR   32      /* a near-dark ALS mustn't make thr ~0 */
+
+static int hr_fresh;          /* the last frame found a spectral peak */
+static uint32_t bpm_good_ms;  /* time of the last fresh peak */
+static int amb_run;           /* consecutive samples above als_thr */
+static int hr_gap;            /* window would hold a gap: restart when clean */
+static uint16_t last_fed;     /* last sample that went into the window */
+static uint32_t moved_ms;     /* last time the wrist moved hard */
+static int moved_seen;
+static uint32_t hr_holds;     /* diag: times the display went to hold */
+
 static void ppg_reset(int daq_too)
 {
     if (daq_too) {
         daq_n = 0;
         daq_enough = 0;
+        amb_run = 0;
     }
     hra_i = 0;
     for (int i = 0; i < HR_AVG_N; i++)
@@ -450,8 +485,11 @@ static int hr_process(int init)
         loc = 0;
     if (loc == 0)
         spec_reset = 1;
+    hr_fresh = loc > 0;
 
     als_thr = (uint32_t)(als_val * 2.0f);
+    if (als_thr < HR_ALS_FLOOR)
+        als_thr = HR_ALS_FLOOR;
 
     /* 20-frame average of the non-zero readings */
     hra_i = (hra_i + 1) % HR_AVG_N;
@@ -509,6 +547,26 @@ static void hrs_init(void)
     hrs_ok = 1;
 }
 
+/* restart acquisition, keeping the learned ALS threshold (a soft reset
+   mustn't blind the off-wrist check for a whole frame) */
+static void hr_restart(int daq_too)
+{
+    uint32_t thr = als_thr;
+    uint16_t av = als_val;
+    ppg_reset(daq_too);
+    als_thr = thr;
+    als_val = av;
+}
+
+/* stop calling the reading live; sensors_tick drops it after the hold */
+static void hr_hold(void)
+{
+    if (bpm_valid) {
+        bpm_valid = 0;
+        hr_holds++;
+    }
+}
+
 static void hrs_sample(uint32_t now)
 {
     /* registers 0x08..0x0F: C1DATAM C0DATAM C0DATAH PDRIVER C1DATAH
@@ -549,27 +607,55 @@ static void hrs_sample(uint32_t now)
         if (ppg[i] > ppg_hi) ppg_hi = ppg[i];
     }
 
-    /* Ppg::Preprocess */
+    /* ambient light: debounced off-wrist decision */
+    int ambient = als > als_thr;
+    if (!ambient)
+        amb_run = 0;
+    else if (amb_run < HR_AMB_OFF_N)
+        amb_run++;
+    if (amb_run >= HR_AMB_OFF_N) {
+        /* light for 1.5 s straight: really off the wrist. Full reset
+           (re-learns the ALS level) and the dash shows right away. */
+        ppg_reset(1);
+        amb_run = 0;
+        hr_gap = 0;
+        bpm_valid = 0;
+        bpm = 0;
+        return;
+    }
+    int moving = moved_seen && now - moved_ms < HR_STILL_MS;
+    if (moving || amb_run > HR_AMB_PATCH_N) {
+        /* arm swing or a longer light leak: feeding it would only teach
+           the FFT garbage. Pause, hold the reading greyed, restart the
+           window once the signal is clean again. */
+        hr_gap = 1;
+        hr_hold();
+        return;
+    }
+    if (hr_gap) {
+        hr_restart(1);
+        hr_gap = 0;
+    }
+
+    /* Ppg::Preprocess. A short blip is bridged with the last good
+       sample so the 10 Hz grid stays intact. */
+    uint16_t s = ambient && daq_n ? last_fed : (uint16_t)hrs;
     if (daq_n < HR_N)
-        daq[daq_n++] = (uint16_t)hrs;
-    als_val = (uint16_t)als;
-    int ambient = als_val > als_thr;
+        daq[daq_n++] = s;
+    last_fed = s;
+    if (!ambient)
+        als_val = (uint16_t)als;     /* thr only learns from clean light */
 
     int r = hr_rate();
-    /* HeartRateTask::HandleSensorData */
-    if (ambient) {             /* light reached the sensor: off the wrist */
-        ppg_reset(1);
-        r = 0;
-        bpm_valid = 0;
-        bpm = 0;
-    }
     if (r == -1) {
-        ppg_reset(0);
-        bpm_valid = 0;
-        bpm = 0;
+        /* lost lock: restart the estimator, keep window + held value */
+        hr_restart(0);
+        hr_hold();
     } else if (r > 0) {
         bpm = r;
         bpm_valid = 1;
+        if (hr_fresh)
+            bpm_good_ms = now;
     }
 }
 
@@ -600,24 +686,34 @@ void sensors_tick(uint32_t now)
             bma_init();              /* re-stream the engine, max 3 tries */
         }
     }
+    /* use the unlatched clock: hal_millis() is frozen for a whole
+       render frame. */
+    uint32_t raw = hal_millis_raw();
     if (bma_ok && now - last_bma >= 20) {   /* 50 Hz accel */
         last_bma = now;
         bma_sample(now);
+        if (act_delta > HR_MOVE_MG) {        /* HR motion gate */
+            moved_ms = raw;
+            moved_seen = 1;
+        }
     }
-    /* use the unlatched clock: hal_millis() is frozen for a whole
-       render frame. Samples sit on a fixed 100 ms grid, the sensor's
-       own conversion period (InfiniTime: deltaTms = 100). A late loop
-       takes the sample as soon as it can; a long stall (>400 ms) would
-       smear the spectrum, so the window restarts instead. */
-    uint32_t raw = hal_millis_raw();
+    /* Samples sit on a fixed 100 ms grid, the sensor's own conversion
+       period (InfiniTime: deltaTms = 100). A late loop takes the sample
+       as soon as it can; a long stall (>400 ms) would smear the
+       spectrum, so the window restarts instead (the reading is held:
+       before 2.2 it stayed "live" with no estimator behind it). */
     if (hrs_ok && hr_on && hrs_powered && (int32_t)(raw - next_daq_ms) >= 0) {
         if ((int32_t)(raw - next_daq_ms) > 400) {
-            ppg_reset(1);
+            hr_restart(1);
+            hr_hold();
             next_daq_ms = raw;
         }
         next_daq_ms += 100;
         hrs_sample(raw);
     }
+    /* held reading expires a minute after the last fresh peak */
+    if (!bpm_valid && bpm > 0 && raw - bpm_good_ms >= HR_HOLD_MS)
+        bpm = 0;
     /* power writes live here, not in sensors_hr_set: a blocking i2c
        transaction from inside an LVGL tap handler was the "crashed
        when I toggled heart rate" path — it ran mid-event-dispatch */
@@ -744,11 +840,20 @@ int sensors_hrs_ac(void)    { return (int)win_max; }
 int sensors_hrs_beats(void) { return (int)beats; }
 int sensors_hrs_ibi(void)   { return (int)last_ibi; }
 int sensors_steps(void)   { return bma_ok ? (int)steps : -1; }
+/* live or held BPM; sensors_bpm_stale() says which */
 int sensors_bpm(void)
 {
     if (!hrs_ok) return -1;   /* no sensor */
-    return bpm_valid ? bpm : 0;   /* 0 = measuring / poor contact */
+    return bpm > 0 ? bpm : 0; /* 0 = measuring / off the wrist */
 }
+/* 1 while the BPM shown is the held last good reading (lost lock,
+   moving, light leak), not a live one */
+int sensors_bpm_stale(void) { return hrs_ok && bpm > 0 && !bpm_valid; }
+int sensors_hr_moving(void)
+{
+    return moved_seen && hal_millis_raw() - moved_ms < HR_STILL_MS;
+}
+int sensors_hr_holds(void) { return (int)hr_holds; }
 
 /* ECG trace data: sample i (0..PPG_N-1) oldest→newest, normalised -1..1.
    Real signal whenever there's measurable amplitude — a missing BPM

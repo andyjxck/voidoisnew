@@ -37,6 +37,19 @@ build/test_hr: tests/hr/test_hr.c firmware/sensors.c
 	mkdir -p build
 	$(CC) -std=gnu11 -O1 -w -Iinclude -Icore -Ifirmware tests/hr/test_hr.c -o $@ -lm
 
+# same scenarios against the 2.1.0 HR code, for a before/after picture
+build/sensors_2_1.c:
+	mkdir -p build
+	git show 779232a4:firmware/sensors.c > $@
+
+build/test_hr_old: tests/hr/test_hr.c build/sensors_2_1.c
+	$(CC) -std=gnu11 -O1 -w -Iinclude -Icore -Ifirmware -DHR_OLD \
+	    -DSENSORS_C='"../../build/sensors_2_1.c"' tests/hr/test_hr.c -o $@ -lm
+
+hrcompare: build/test_hr build/test_hr_old
+	./build/test_hr_old | grep '^\['
+	./build/test_hr | grep '^\['
+
 test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr
 	./build/test_app
 	SDL_VIDEODRIVER=dummy ./build/test_screenshot
@@ -52,7 +65,7 @@ uicheck:
 	./tests/uisnap/snap build/uisnap
 
 clean:
-	rm -rf build/voidos-sim build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/uisnap
+	rm -rf build/voidos-sim build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/test_hr_old build/sensors_2_1.c build/uisnap
 	-rmdir build 2>/dev/null || true
 
-.PHONY: all test uicheck clean
+.PHONY: all test uicheck clean hrcompare
