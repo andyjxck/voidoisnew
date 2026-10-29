@@ -122,8 +122,20 @@ static int idle_ready;
 static uint32_t idle_sleeps;
 uint32_t hal_idle_sleeps(void) { return idle_sleeps; }
 
+/* 2.2.3: the side button wakes the idle wait at once. Its pin senses
+   high, GPIOTE turns that into a PORT event with the interrupt enabled
+   in the peripheral only (like RTC1), and SEVONPEND makes it a WFE
+   wake-up. The screen-off loop can then idle ~90 ms per pass instead
+   of 20 without a short press being missed or feeling late. */
+#define GPIOTE_EVENTS_PORT   REG32(0x4000617C)
+#define GPIOTE_INTENSET      REG32(0x40006304)
+#define GPIOTE_IRQ_BIT       (1u << 6)
+
 static void idle_init(void)
 {
+    GPIOTE_EVENTS_PORT = 0;
+    GPIOTE_INTENSET = 1u << 31;        /* PORT -> pending (no ISR) */
+    NVIC_ICPR0 = GPIOTE_IRQ_BIT;
     RTC1_EVENTS_COMPARE0 = 0;
     RTC1_INTENSET = 1u << 16;          /* COMPARE0 -> pending (no ISR) */
     NVIC_ICPR0 = RTC1_IRQ_BIT;
@@ -131,7 +143,12 @@ static void idle_init(void)
     idle_ready = 1;
 }
 
-void hal_delay_ms(unsigned ms)
+static void delay_ms(unsigned ms, int btn_wakes);
+void hal_delay_ms(unsigned ms) { delay_ms(ms, 0); }
+/* main-loop idle: returns early when the side button goes down */
+void hal_idle_ms(unsigned ms) { delay_ms(ms, 1); }
+
+static void delay_ms(unsigned ms, int btn_wakes)
 {
     uint32_t t0 = millis_raw();
     if (!idle_ready || ms < 2) {
@@ -143,6 +160,13 @@ void hal_delay_ms(unsigned ms)
         uint32_t el = millis_raw() - t0;
         if (el >= ms)
             break;
+        if (GPIOTE_EVENTS_PORT) {
+            GPIOTE_EVENTS_PORT = 0;
+            (void)GPIOTE_EVENTS_PORT;
+            NVIC_ICPR0 = GPIOTE_IRQ_BIT;
+            if (btn_wakes)
+                break;
+        }
         uint32_t left = ms - el;
         if (left > 60000u)
             left = 60000u;
@@ -273,6 +297,7 @@ void hal_clock_date(int *y, int *mo, int *d, int *dow)
    1.6.x had this inverted: the first hal_motor() call (a notification,
    timer or water-lock exit) drove the pin low and every "off" after
    that kept it low, which is the runaway vibration 1.6.1 chased. */
+static uint8_t motor_on;
 static void motor_init(void)
 {
     GPIO_OUTSET = 1u << PIN_VIBRA;        /* off before it becomes an output */
@@ -281,6 +306,7 @@ static void motor_init(void)
 
 void hal_motor(int on)
 {
+    motor_on = on ? 1 : 0;
     if (on)
         GPIO_OUTCLR = 1u << PIN_VIBRA;
     else
@@ -294,66 +320,122 @@ static int battery_fail;
 int hal_battery_raw(void) { return battery_raw; }
 int hal_battery_fail(void) { return battery_fail; }
 
-int hal_battery_pct(void)
+/* 2.2.3: one averaged, load-compensated reading about once a minute,
+   run through batt.h's filter. Everything that shows or sends the
+   battery (control centre, diag, BLE battery service for InfiniLink and
+   the iPhone) reads the same filtered number via hal_battery_pct(),
+   which no longer touches the ADC. */
+#include "batt.h"
+static batt_t batt;
+static uint32_t batt_next_ms, batt_cal_ms, batt_last_mv;
+static int batt_ncal, batt_samples;
+int display_bl_level(void);
+int sensors_hr_powered(void);
+int hal_battery_mv(void) { return (int)batt_last_mv; }
+int hal_battery_est10(void) { return batt.raw10; }
+
+/* charge indicator P0.12 low while the charger is charging */
+int hal_charging(void) { return hal_on_charger() && (GPIO_IN & BIT(12)) == 0; }
+
+static int saadc_wait(volatile uint32_t *ev)
 {
-    /* InfiniTime's discharge curve (BatteryController.cpp) */
-    static const uint16_t curve[][2] = {
-        {3500, 0}, {3616, 3}, {3723, 22}, {3776, 48}, {3979, 79}, {4180, 100}
-    };
-    /* volatile: EasyDMA writes this behind the compiler's back. In 2.2.0
-       it was a plain array, so GCC folded "result[0] = 0 ... raw =
-       result[0]" into the constant 0 and the reading was always 0. */
+    for (unsigned spin = 0; spin < 200000; spin++)
+        if (*ev)
+            return 1;
+    return 0;
+}
+
+/* One battery reading in mV: 4 conversions, each the SAADC's own
+   16x oversample (BURST), averaged = 64 samples. Gain 1/4, internal
+   0.6 V reference (2.4 V full scale; the 2:1 divider puts a full cell at
+   2.1 V), 40 us acquisition for the divider's high source impedance.
+   Offset calibration at the first reading and every 6 hours. -1 if no
+   conversion landed. */
+static int battery_read_mv(uint32_t now)
+{
     static volatile int16_t result[2];
     SAADC_ENABLE = 1;
+    if (!batt_ncal || now - batt_cal_ms > 6u * 3600u * 1000u) {
+        SAADC_EVENTS_CALDONE = 0;
+        SAADC_CALIBRATE = 1;
+        if (saadc_wait(&SAADC_EVENTS_CALDONE)) {
+            batt_ncal++;
+            batt_cal_ms = now;
+        }
+        SAADC_EVENTS_CALDONE = 0;
+    }
     SAADC_CH0_PSELP = 8;            /* PSEL is AIN#+1: 8 = AIN7 = P0.31 */
     SAADC_CH0_PSELN = 0;
-    /* InfiniTime's channel config: gain 1/4, internal 0.6 V ref (2.4 V
-       full scale), 40 us acquisition (the 2:1 divider is high impedance) */
-    SAADC_CH0_CONF = (2u << 8) | (5u << 16);
+    SAADC_CH0_CONF = (2u << 8) | (5u << 16) | (1u << 24); /* + BURST */
     SAADC_RESOL = 2;                /* 12 bit */
-    SAADC_OVERSAMPLE = 0;
-    SAADC_SAMPLERATE = 0;           /* one sample per SAMPLE task */
-    SAADC_RES_PTR = (uint32_t)result;
-    SAADC_RES_MAX = 1;
-    SAADC_EVENTS_STARTED = 0;
-    SAADC_EVENTS_END = 0;
-    SAADC_EVENTS_STOPPED = 0;
-    result[0] = -32768;             /* sentinel: never written by the ADC */
-    SAADC_START = 1;
-    /* datasheet order: START -> STARTED -> SAMPLE -> END (the result is
-       in RAM) -> STOP -> STOPPED. 2.2.0 waited on DONE (0x108, the
-       conversion only) and then on CALIBRATEDONE (0x110), which never
-       fires, so it stopped the SAADC before the result reached RAM. */
-    for (unsigned spin = 0; !SAADC_EVENTS_STARTED && spin < 200000; spin++)
-        ;
-    SAADC_SAMPLE = 1;
-    for (unsigned spin = 0; !SAADC_EVENTS_END && spin < 200000; spin++)
-        ;
-    SAADC_STOP = 1;
-    for (unsigned spin = 0; !SAADC_EVENTS_STOPPED && spin < 200000; spin++)
-        ;
-    SAADC_ENABLE = 0;
-    __asm volatile ("" ::: "memory");
-    int raw = result[0];
-    if (raw == -32768) {            /* no conversion landed: keep the last */
-        battery_fail++;
-        raw = battery_raw > 0 ? battery_raw : 0;
-    }
-    battery_raw = raw;
-    if (raw < 0) raw = 0;
-    /* raw/4096 * 2.4 V input range * 2 (the 2:1 battery divider) */
-    uint32_t mv = (uint32_t)raw * 4800u / 4096u;
-    if (mv <= curve[0][0])
-        return 0;
-    for (unsigned i = 1; i < sizeof curve / sizeof curve[0]; i++) {
-        if (mv <= curve[i][0]) {
-            uint32_t dv = curve[i][0] - curve[i - 1][0];
-            uint32_t dp = curve[i][1] - curve[i - 1][1];
-            return (int)(curve[i - 1][1] +
-                         (mv - curve[i - 1][0]) * dp / dv);
+    SAADC_OVERSAMPLE = 4;           /* 16x, averaged in hardware */
+    SAADC_SAMPLERATE = 0;
+    int32_t sum = 0;
+    int n = 0;
+    for (int k = 0; k < 4; k++) {
+        result[0] = -32768;         /* sentinel: never written by the ADC */
+        SAADC_RES_PTR = (uint32_t)result;
+        SAADC_RES_MAX = 1;
+        SAADC_EVENTS_STARTED = 0;
+        SAADC_EVENTS_END = 0;
+        SAADC_EVENTS_STOPPED = 0;
+        SAADC_START = 1;
+        saadc_wait(&SAADC_EVENTS_STARTED);
+        SAADC_SAMPLE = 1;
+        saadc_wait(&SAADC_EVENTS_END);
+        SAADC_STOP = 1;
+        saadc_wait(&SAADC_EVENTS_STOPPED);
+        __asm volatile ("" ::: "memory");
+        int raw = result[0];
+        if (raw != -32768) {
+            sum += raw < 0 ? 0 : raw;
+            n++;
         }
     }
-    return 100;
+    SAADC_OVERSAMPLE = 0;
+    SAADC_ENABLE = 0;
+    if (!n) {
+        battery_fail++;
+        return -1;
+    }
+    battery_raw = (int)(sum / n);
+    /* raw/4096 * 2.4 V input range * 2 (the 2:1 battery divider) */
+    return (int)((uint32_t)battery_raw * 4800u / 4096u);
+}
+
+/* called from the main loop; reads at most once a minute (every 30 s
+   on the charger, 4 quick ones after boot to seed the filter). Waits
+   while the motor runs (~70 mA would read as a 20-30 mV drop). */
+void hal_battery_poll(uint32_t now)
+{
+    if (batt.disp >= 0 && (int32_t)(now - batt_next_ms) < 0)
+        return;
+    if (motor_on) {
+        batt_next_ms = now + 2000;
+        return;
+    }
+    int mv = battery_read_mv(now);
+    uint32_t period = batt_samples < 4 ? 2000u
+                    : hal_on_charger() ? 30000u : 60000u;
+    batt_next_ms = now + period;
+    if (mv < 0)
+        return;
+    batt_samples++;
+    batt_last_mv = (uint32_t)mv;
+    struct batt_load ld = {
+        (uint8_t)display_bl_level(), (uint8_t)sensors_hr_powered(), 0
+    };
+    int pw = hal_on_charger();
+    batt_feed(&batt, mv, &ld, pw, pw && !hal_charging());
+}
+
+int hal_battery_pct(void)
+{
+    if (batt.disp < 0) {             /* first caller before the loop ran */
+        batt_reset(&batt);
+        hal_battery_poll(hal_millis());
+    }
+    return batt.disp < 0 ? 0 : batt.disp;
 }
 
 static void time_init(void)
@@ -639,7 +721,8 @@ static void button_init(void)
 {
     GPIO_DIRSET = BIT(PIN_BTN_OUT);
     GPIO_OUTSET = BIT(PIN_BTN_OUT);
-    GPIO_PIN_CNF(PIN_BTN_IN) = (1u << 2); /* input, pull-down */
+    /* input, pull-down, SENSE high (2.2.3: wakes the idle wait) */
+    GPIO_PIN_CNF(PIN_BTN_IN) = (1u << 2) | (2u << 16);
 }
 
 /* ---- touch sampling ------------------------------------------------------ */
@@ -754,6 +837,7 @@ int hal_init(void)
     time_init();
     button_init();
     motor_init();
+    batt_reset(&batt);
     nimble_stage(80);
     display_init();
     twi_init();

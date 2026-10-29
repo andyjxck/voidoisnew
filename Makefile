@@ -59,7 +59,7 @@ hrcompare: build/test_hr build/test_hr_old
 	./build/test_hr_old | grep '^\['
 	./build/test_hr | grep '^\['
 
-test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/test_ble_units build/test_store_daily build/test_btn
+test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/test_ble_units build/test_store_daily build/test_btn build/test_batt
 	./build/test_app
 	SDL_VIDEODRIVER=dummy ./build/test_screenshot
 	SDL_VIDEODRIVER=dummy ./build/test_input
@@ -68,6 +68,7 @@ test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu b
 	./build/test_ble_units
 	./build/test_store_daily
 	./build/test_btn
+	./build/test_batt
 
 # everything: host tests plus the rendered-screen checks
 check: test uicheck
@@ -88,6 +89,10 @@ clean:
 	-rmdir build 2>/dev/null || true
 
 .PHONY: all test check uicheck clean hrcompare heapcheck
+
+build/test_batt: tests/test_batt.c firmware/batt.h
+	mkdir -p build
+	$(CC) -std=gnu11 -O1 -Wall -Wextra -Werror $< -o $@
 
 build/test_btn: tests/test_btn.c firmware/btn_sm.h
 	mkdir -p build

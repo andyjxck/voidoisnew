@@ -40,12 +40,20 @@ int main(void)
     for (;;) {
         hal_frame_begin();    /* one time instant for the whole frame */
         ui_tick();
+        extern void hal_battery_poll(uint32_t now);
+        hal_battery_poll(hal_millis());
         extern int ui_asleep(void);
         if (!ui_asleep())
             lv_timer_handler();   /* render before ble_poll: if the BLE
                                      path hangs, the face + banner stay */
-        else
-            hal_delay_ms(20);     /* dark: nothing to draw, idle slower */
+        else {
+            /* dark: nothing to draw. 2.2.3: idle ~90 ms (sensors only
+               need their 100 ms grid; the button wakes it early), 20 ms
+               while the HR sensor is sampling at 10 Hz */
+            extern int sensors_hr_powered(void);
+            extern void hal_idle_ms(unsigned ms);
+            hal_idle_ms(sensors_hr_powered() ? 20 : 90);
+        }
         wdt_kick();
         ble_poll();
         /* 3 s of survived main-loop = sane boot: permanently confirm the

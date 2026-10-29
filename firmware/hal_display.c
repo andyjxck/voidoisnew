@@ -149,8 +149,11 @@ void display_fill(int x0, int y0, int x1, int y1, uint16_t c)
     lcd_select(0);
 }
 
+static int bl_level;
+int display_bl_level(void) { return bl_level; }
 void display_backlight(int level) /* 0..3 */
 {
+    bl_level = level < 0 ? 0 : level > 3 ? 3 : level;
     uint32_t all = BIT(PIN_BL_L) | BIT(PIN_BL_M) | BIT(PIN_BL_H);
     GPIO_OUTSET = all;
     if (level >= 1) GPIO_OUTCLR = BIT(PIN_BL_L);
