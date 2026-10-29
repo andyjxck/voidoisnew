@@ -308,6 +308,72 @@ static void tap_filter(lv_event_t *e)
         lv_event_stop_processing(e);
 }
 
+/* 2.1 look: every button and value pill is drawn as the face's
+   chamfered neon pill instead of a grey rounded box. The widget's
+   bg_color still carries its meaning (callers flip it for on/off), and
+   is read here at draw time:
+     C_ACCENT / C_GOOD   solid fill, dark text (an "on" state)
+     C_FILL / C_PANEL / black   cyan outline, black inside
+     C_EDGE              dim outline (an "off" value pill)
+     anything else       outline + faint tint in that colour (red = warn)
+   Pressed adds a tint so taps still show. */
+static void pill_draw(lv_event_t *e)
+{
+    lv_obj_t *o = lv_event_get_target(e);
+    lv_layer_t *l = lv_event_get_layer(e);
+    lv_area_t a;
+    lv_obj_get_coords(o, &a);
+    int w = a.x2 - a.x1 + 1, h = a.y2 - a.y1 + 1;
+    int cut = h / 4;
+    if (cut > 9)
+        cut = 9;
+    if (cut < 3)
+        cut = 3;
+    lv_color_t c = lv_obj_get_style_bg_color(o, LV_PART_MAIN);
+    uint32_t hx = lv_color_to_u32(c) & 0xFFFFFF;
+    int pressed = lv_obj_has_state(o, LV_STATE_PRESSED);
+    if (hx == 0x46D8E0 || hx == 0x3CC850) {
+        dk_oct(l, a.x1, a.y1, w, h, cut, c, 1, LV_OPA_COVER);
+        return;
+    }
+    lv_opa_t tint = pressed ? LV_OPA_40 : LV_OPA_TRANSP;
+    lv_color_t stroke = c;
+    if (hx == 0x151B26 || hx == 0x0B0E14 || hx == 0x000000)
+        stroke = lv_color_hex(0x46D8E0);
+    else if (hx != 0x1E4E56 && !pressed)
+        tint = LV_OPA_20;
+    dk_oct(l, a.x1, a.y1, w, h, cut, lv_color_black(), 1, LV_OPA_COVER);
+    if (tint)
+        dk_oct(l, a.x1, a.y1, w, h, cut, stroke, 1, tint);
+    dk_oct(l, a.x1, a.y1, w, h, cut, stroke, 1, LV_OPA_TRANSP);
+}
+
+static void pill_style(lv_obj_t *b)
+{
+    lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(b, 0, 0);
+    lv_obj_set_style_outline_width(b, 0, 0);
+    lv_obj_set_style_outline_width(b, 0, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_add_event_cb(b, pill_draw, LV_EVENT_DRAW_MAIN_BEGIN, NULL);
+}
+
+/* non-interactive neon card behind a screen's main value */
+static lv_obj_t *mk_card(lv_obj_t *parent, int x, int y, int w, int h,
+                         lv_color_t c)
+{
+    lv_obj_t *o = lv_obj_create(parent);
+    lv_obj_set_pos(o, x, y);
+    lv_obj_set_size(o, w, h);
+    lv_obj_set_style_bg_color(o, c, 0);
+    lv_obj_set_style_radius(o, 0, 0);
+    lv_obj_set_style_pad_all(o, 0, 0);
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    pill_style(o);
+    return o;
+}
+
 static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt,
                         int x, int y, int w, int h, lv_color_t fill,
                         lv_event_cb_t cb)
@@ -323,6 +389,7 @@ static lv_obj_t *mk_btn(lv_obj_t *parent, const char *txt,
     lv_obj_set_style_border_color(b, C_EDGE, 0);
     lv_obj_set_style_shadow_width(b, 0, 0);
     lv_obj_set_style_pad_all(b, 0, 0);
+    pill_style(b);
     /* LVGL fires CLICKED on release even after a long drag (nothing
        here scrolls), so the tail of every hardware swipe that began
        on a button was also clicking it — phantom toggles/navigation
@@ -378,7 +445,7 @@ static void mk_header(lv_obj_t *parent, const char *title, int with_back)
     lv_obj_t *line = lv_obj_create(parent);
     lv_obj_set_pos(line, 12, 37);
     lv_obj_set_size(line, 216, 1);
-    lv_obj_set_style_bg_color(line, lv_color_hex(0x1A2432), 0);
+    lv_obj_set_style_bg_color(line, lv_color_hex(0x1E4E56), 0);
     lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(line, 0, 0);
     lv_obj_set_style_pad_all(line, 0, 0);
@@ -1497,6 +1564,7 @@ static void build_w_run(lv_obj_t *r)
     page_bg(r);
     static const char *rt[3] = {"PUSH DAY", "PULL DAY", "LEG DAY"};
     mk_header(r, w_routine >= 0 ? rt[w_routine] : "QUICK SESSION", 0);
+    mk_card(r, 20, 68, 200, 66, C_FILL);
     char buf[16];
     fmt_ms((w_paused ? w_pause_ms : hal_millis()) - w_start_ms -
            w_paused_total, buf);
@@ -1519,6 +1587,7 @@ static void build_w_done(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "SUMMARY", 1);
+    mk_card(r, 20, 76, 200, 84, C_FILL);
     char buf[16];
     fmt_ms(w_last_ms, buf);
     mk_label_c(r, &kenney24, C_WHITE, 120, 90, buf);
@@ -1560,6 +1629,7 @@ static void build_sleep(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "SLEEP", 1);
+    mk_card(r, 20, 38, 200, 64, s_in_bed ? C_WARN : C_FILL);
     mk_label_c(r, &kenney12, C_MUTED, 120, 46, s_in_bed ? "IN BED" : "LAST NIGHT");
     char buf[24];
     if (s_in_bed)
@@ -1583,6 +1653,7 @@ static void build_s_done(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "NIGHT", 1);
+    mk_card(r, 20, 64, 200, 74, C_FILL);
     mk_label_c(r, &kenney12, C_MUTED, 120, 76, "TIME IN BED");
     char buf[16];
     fmt_ms(s_last_ms, buf);
@@ -1607,6 +1678,7 @@ static void build_water(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "WATER", 1);
+    mk_card(r, 20, 70, 200, 94, C_FILL);
     char buf[24];
     lv_snprintf(buf, sizeof buf, "%d ML", water_ml);
     mk_label_c(r, &kenney24, C_ACCENT, 120, 82, buf);
@@ -1617,8 +1689,10 @@ static void build_water(lv_obj_t *r)
     lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);   /* display only */
     lv_bar_set_range(bar, 0, 2000);
     lv_bar_set_value(bar, water_ml > 2000 ? 2000 : water_ml, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(bar, C_FILL, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bar, C_EDGE, LV_PART_MAIN);
     lv_obj_set_style_bg_color(bar, C_ACCENT, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(bar, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(bar, 0, LV_PART_INDICATOR);
     lv_obj_t *b;
     b = mk_btn(r, "+250", 20, 178, 97, 42, C_FILL, water_cb);
     lv_obj_set_user_data(b, (void *)(intptr_t)250);
@@ -1770,9 +1844,9 @@ static lv_obj_t *mk_row(lv_obj_t *r, int y, const char *name,
         lv_obj_set_style_radius(pill, 3, 0);
         lv_obj_set_style_border_width(pill, on ? 0 : 1, 0);
         lv_obj_set_style_border_color(pill, C_EDGE, 0);
-        lv_obj_set_style_bg_color(pill, on ? C_ACCENT : C_BG, 0);
-        lv_obj_set_style_bg_opa(pill, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(pill, on ? C_ACCENT : C_EDGE, 0);
         lv_obj_set_style_pad_all(pill, 0, 0);
+        pill_style(pill);
         lv_obj_remove_flag(pill, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_t *vl = lv_label_create(pill);
         lv_obj_set_style_text_font(vl, strlen(val) > 4 ? &kenney12 : &kenney16, 0);
@@ -1864,6 +1938,8 @@ static void build_settime(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "SET TIME", 1);
+    mk_card(r, 20, 40, 90, 52, C_FILL);
+    mk_card(r, 130, 40, 90, 52, C_FILL);
     if (!set_h && !set_m) {
         set_h = hal_clock_hour();
         set_m = hal_clock_minute();
@@ -2321,12 +2397,12 @@ static void build_notif(lv_obj_t *r)
         lv_obj_set_pos(row, 12, y);
         lv_obj_set_size(row, 216, 44);
         /* chamfered-outline card, like the concept list items */
-        lv_obj_set_style_bg_color(row, lv_color_hex(0x0B0E14), 0);
-        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+        /* neon pill: cyan for ones that alerted, dim for silent */
+        lv_obj_set_style_bg_color(row, (v->flags & 0x01) ? C_EDGE
+                                       : lv_color_hex(0x0B0E14), 0);
         lv_obj_set_style_radius(row, 0, 0);
-        lv_obj_set_style_border_width(row, 1, 0);
-        lv_obj_set_style_border_color(row, C_EDGE, 0);
         lv_obj_set_style_pad_all(row, 0, 0);
+        pill_style(row);
         lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_user_data(row, (void *)(intptr_t)i);
         lv_obj_add_event_cb(row, notif_item_cb, LV_EVENT_CLICKED, NULL);
@@ -2336,9 +2412,9 @@ static void build_notif(lv_obj_t *r)
         lv_obj_t *dot = lv_obj_create(row);
         lv_obj_set_pos(dot, 8, 18);
         lv_obj_set_size(dot, 7, 7);
-        lv_obj_set_style_bg_color(dot, C_ACCENT, 0);
+        lv_obj_set_style_bg_color(dot, C_WARN, 0);
         lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(dot, 4, 0);
+        lv_obj_set_style_radius(dot, 0, 0);
         lv_obj_set_style_border_width(dot, 0, 0);
         lv_obj_remove_flag(dot,
                            LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
