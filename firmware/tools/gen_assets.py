@@ -129,10 +129,13 @@ def main():
     with open(LVGL_OUT, "w") as f:
         f.write('#include "lvgl.h"\n#include "src/font/lv_font_fmt_txt.h"\n\n')
         for px in (9, 12, 16, 24, 56):
+            # 2.2.3: the 56 px face/cardio digits only ever draw "-./0-9:"
+            # (45..58); the full ASCII set cost 67 KB of flash
+            first, last = (45, 58) if px == 56 else (FIRST, LAST)
             font = ImageFont.truetype(os.path.join(FONTS, "Kenney Future.ttf"), px)
             ascent, descent = font.getmetrics()
             glyphs, bitmap = [(0, 0, 0, 0, 0, 0)], bytearray()
-            for code in range(FIRST, LAST + 1):
+            for code in range(first, last + 1):
                 ch = chr(code)
                 adv = int(round(font.getlength(ch)))
                 x0, y0, x1, y1 = font.getbbox(ch, anchor="la")
@@ -156,7 +159,7 @@ def main():
                 f.write("    {%d,%d,%d,%d,%d,%d},\n" % g)
             f.write("};\n")
             f.write(f"static const lv_font_fmt_txt_cmap_t kenney{px}_cmap = {{"
-                    f".range_start = {FIRST}, .range_length = {LAST - FIRST + 1}, "
+                    f".range_start = {first}, .range_length = {last - first + 1}, "
                     ".glyph_id_start = 1, .type = LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY};\n")
             f.write(f"static const lv_font_fmt_txt_dsc_t kenney{px}_dsc = {{"
                     f".glyph_bitmap = kenney{px}_bits, .glyph_dsc = kenney{px}_glyphs, "
