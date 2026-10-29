@@ -1,3 +1,6 @@
+#include <stdint.h>
+#include "ui_deco.h"
+#include "phone.h"
 #include <math.h>
 #include "lvgl.h"
 #include "voidos/hal.h"
@@ -11,6 +14,7 @@ int sensors_ppg(int i, int *out_y100);
 int sensors_hrs_ok(void);
 int hal_clock_synced(void);
 int ui_face_digital(void);
+int phone_take_face_dirty(void);
 void hal_clock_date(int *y, int *mo, int *d, int *dow);
 
 /* Analog face: black field bleeding into the bezel, edge ticks,
@@ -227,35 +231,141 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font,
     return obj;
 }
 
-/* octagon badge outline — the digital face's chamfered cards */
-static void oct_stroke(lv_layer_t *layer, int x, int y, int w, int h,
-                       int cut, lv_color_t c, int lw)
-{
-    int x2 = x + w - 1, y2 = y + h - 1;
-    const int px[8] = {x + cut, x2 - cut, x2, x2, x2 - cut, x + cut, x, x};
-    const int py[8] = {y, y, y + cut, y2 - cut, y2, y2, y2 - cut, y + cut};
-    lv_draw_line_dsc_t dsc;
-    lv_draw_line_dsc_init(&dsc);
-    dsc.color = c;
-    dsc.width = lw;
-    for (int i = 0; i < 8; i++) {
-        dsc.p1.x = px[i];
-        dsc.p1.y = py[i];
-        dsc.p2.x = px[(i + 1) % 8];
-        dsc.p2.y = py[(i + 1) % 8];
-        lv_draw_line(layer, &dsc);
-    }
 }
+
+/* ---- digital face, 2.1 layout ------------------------------------------
+   y   8..49   weather chip (left, tap -> weather)   date block (right)
+   y  54..117  big time
+   y 124..164  now-playing chip while music plays (tap -> music),
+               else a hex rule
+   y 170..232  steps pill (cyan) + heart-rate pill (red), each 112x62 so
+               a 5-digit step count / 3-digit BPM sits on its own row
+               under the label instead of on top of it */
+#define PILL_Y 170
+#define PILL_H 63
+#define PILL_W 112
+#define PILL_LX 5
+#define PILL_RX 123
+#define CHIP_Y 8
+#define CHIP_H 42
+#define MUS_Y 123
+#define MUS_H 42
+
+static lv_obj_t *d_wx_hit, *d_wx_temp, *d_wx_city, *d_mus_hit, *d_mus_lbl;
+static lv_obj_t *d_lbl_dow;
+static lv_obj_t *art_obj;
+static int d_wx_icon = -2, d_mus_on = -1, d_mus_playing = -1;
+static uint32_t d_wx_rx;
+void ui_nav_open(int which);       /* ui_nav.c: 1 weather, 2 music */
+void ui_music_ascii(char *dst, const char *src, int cap);
 
 static void digi_draw(lv_event_t *ev)
 {
-    lv_layer_t *layer = lv_event_get_layer(ev);
-    oct_stroke(layer, 14, 160, 104, 50, 10, lv_color_hex(0x46D8E0), 2);
-    oct_stroke(layer, 122, 160, 104, 50, 10, lv_color_hex(0xF0586E), 2);
+    lv_layer_t *l = lv_event_get_layer(ev);
+    /* weather chip */
+    int wxok = d_wx_icon >= 0;
+    dk_oct(l, 6, CHIP_Y, 108, CHIP_H, 9, wxok ? DK_CYAN : DK_DIM, 1,
+           wxok ? 28 : 0);
+    dk_wx_icon(l, wxok ? d_wx_icon : -1, 28, CHIP_Y + CHIP_H / 2, 12,
+               lv_color_white());
+    if (wxok) {
+        lv_obj_update_layout(d_wx_temp);
+        int tx = lv_obj_get_x(d_wx_temp);
+        lv_point_t sz;
+        lv_text_get_size(&sz, lv_label_get_text(d_wx_temp), &kenney16, 0, 0,
+                         LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        dk_deg(l, tx + sz.x + 2, CHIP_Y + 8, 3, DK_CYAN);
+    }
+    /* date block: right-aligned, hex tick on the far edge */
+    dk_line(l, 228, CHIP_Y + 4, 228, CHIP_Y + CHIP_H - 4, DK_DIM, 2);
+    /* middle: music chip or hex rule */
+    if (d_mus_on > 0) {
+        dk_oct(l, 18, MUS_Y, 204, MUS_H, 10, DK_RED, 2, 30);
+        dk_hex(l, 42, MUS_Y + MUS_H / 2, 13, DK_RED, 2);
+        dk_music(l, d_mus_playing > 0 ? DK_M_PLAY : DK_M_PAUSE, 43,
+                 MUS_Y + MUS_H / 2, 5, lv_color_white());
+    } else {
+        dk_rule(l, MUS_Y + MUS_H / 2, DK_CYAN);
+    }
+    /* pills */
+    dk_oct(l, PILL_LX, PILL_Y, PILL_W, PILL_H, 11, DK_CYAN, 2, 22);
+    dk_oct(l, PILL_RX, PILL_Y, PILL_W, PILL_H, 11, DK_RED, 2, 22);
+    dk_line(l, PILL_LX + 14, PILL_Y + 30, PILL_LX + PILL_W - 15, PILL_Y + 30,
+            DK_DIM, 1);
+    dk_line(l, PILL_RX + 14, PILL_Y + 30, PILL_RX + PILL_W - 15, PILL_Y + 30,
+            DK_DIMR, 1);
 }
 
-/* digital face: big pixel time, date above, octagon badges below —
-   the concept art's take on VoidOS */
+static void chip_cb(lv_event_t *e)
+{
+    ui_nav_open((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+static lv_obj_t *hit(lv_obj_t *scr, int x, int y, int w, int h, int which)
+{
+    lv_obj_t *o = lv_obj_create(scr);
+    lv_obj_set_pos(o, x, y);
+    lv_obj_set_size(o, w, h);
+    lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(o, 0, 0);
+    lv_obj_set_style_pad_all(o, 0, 0);
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(o, chip_cb, LV_EVENT_CLICKED, (void *)(intptr_t)which);
+    return o;
+}
+
+static lv_obj_t *label_l(lv_obj_t *parent, const lv_font_t *font,
+                         uint32_t color, int x, int y, int width,
+                         lv_text_align_t al, const char *value)
+{
+    lv_obj_t *o = label(parent, font, color, x, y, width, value);
+    lv_obj_set_style_text_align(o, al, 0);
+    return o;
+}
+
+/* refresh weather + music chips; returns 1 when the art must repaint */
+static int face_phone_refresh(void)
+{
+    int dirty = 0;
+    const struct wx *w = wx_get();
+    int icon = w ? w->icon : -1;
+    uint32_t rx = w ? w->rx_ms : 0;
+    if (icon != d_wx_icon || rx != d_wx_rx) {
+        char b[24];
+        if (w) {
+            int t = w->temp >= 0 ? (w->temp + 50) / 100 : -((-w->temp + 50) / 100);
+            lv_snprintf(b, sizeof b, "%d", t);
+            lv_label_set_text(d_wx_temp, b);
+            lv_obj_set_style_text_color(d_wx_temp, lv_color_white(), 0);
+            lv_label_set_text(d_wx_city, wx_name(w->icon));
+        } else {
+            lv_label_set_text(d_wx_temp, "--");
+            lv_obj_set_style_text_color(d_wx_temp, lv_color_hex(0x5A6478), 0);
+            lv_label_set_text(d_wx_city, "NO DATA");
+        }
+        d_wx_icon = icon;
+        d_wx_rx = rx;
+        dirty = 1;
+    }
+    int on = music_active();
+    const struct music *m = music_get();
+    if (on != d_mus_on || (on && m->playing != d_mus_playing) ||
+        (on && phone_take_face_dirty())) {
+        if (on) {
+            char t[44];
+            ui_music_ascii(t, m->track[0] ? m->track : "PLAYING", sizeof t);
+            lv_label_set_text(d_mus_lbl, t);
+            lv_obj_remove_flag(d_mus_hit, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(d_mus_hit, LV_OBJ_FLAG_HIDDEN);
+        }
+        d_mus_on = on;
+        d_mus_playing = m->playing;
+        dirty = 1;
+    }
+    return dirty;
+}
+
 static void build_digital(lv_obj_t *scr)
 {
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
@@ -263,6 +373,7 @@ static void build_digital(lv_obj_t *scr)
     lv_obj_set_style_pad_all(scr, 0, 0);
 
     lv_obj_t *art = lv_obj_create(scr);
+    art_obj = art;
     lv_obj_set_pos(art, 0, 0);
     lv_obj_set_size(art, 240, 240);
     lv_obj_set_style_bg_opa(art, LV_OPA_TRANSP, 0);
@@ -271,10 +382,34 @@ static void build_digital(lv_obj_t *scr)
     lv_obj_remove_flag(art, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(art, digi_draw, LV_EVENT_DRAW_MAIN, NULL);
 
-    d_lbl_date = label(scr, &kenney16, 0xD8E0EC, 40, 42, 160, "FRI, OCT 24");
-    d_lbl_time = label(scr, &kenney56, 0xFFFFFF, 0, 74, 240, "10:09");
+    /* weather chip (tap target = the whole chip, 108x42) */
+    d_wx_hit = hit(scr, 6, CHIP_Y, 108, CHIP_H, 1);
+    d_wx_temp = label_l(scr, &kenney16, 0xFFFFFF, 46, CHIP_Y + 6, 60,
+                        LV_TEXT_ALIGN_LEFT, "--");
+    d_wx_city = label_l(scr, &kenney9, 0x8A94A8, 46, CHIP_Y + 26, 64,
+                        LV_TEXT_ALIGN_LEFT, "NO DATA");
+    lv_obj_remove_flag(d_wx_temp, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(d_wx_city, LV_OBJ_FLAG_CLICKABLE);
 
-    /* badges: footprint + steps (cyan), heart + bpm (pink) */
+    /* date block */
+    d_lbl_dow = label_l(scr, &kenney12, 0x46D8E0, 118, CHIP_Y + 4, 104,
+                        LV_TEXT_ALIGN_RIGHT, "---");
+    d_lbl_date = label_l(scr, &kenney16, 0xD8E0EC, 104, CHIP_Y + 21, 118,
+                         LV_TEXT_ALIGN_RIGHT, "SYNC TIME");
+
+    d_lbl_time = label(scr, &kenney56, 0xFFFFFF, 0, 54, 240, "--:--");
+
+    /* now-playing chip, only while music plays + phone linked */
+    d_mus_hit = hit(scr, 18, MUS_Y, 204, MUS_H, 2);
+    d_mus_lbl = label_l(d_mus_hit, &kenney12, 0xFFFFFF, 46, 7, 150,
+                        LV_TEXT_ALIGN_LEFT, "");
+    lv_label_set_long_mode(d_mus_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_t *np = label_l(d_mus_hit, &kenney9, 0xF0586E, 46, 23, 150,
+                           LV_TEXT_ALIGN_LEFT, "NOW PLAYING");
+    lv_obj_remove_flag(np, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(d_mus_hit, LV_OBJ_FLAG_HIDDEN);
+
+    /* steps pill: footprint + STEPS label row, value row below */
     static lv_image_dsc_t fp_dsc;
     fp_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     fp_dsc.header.w = 24;
@@ -285,14 +420,17 @@ static void build_digital(lv_obj_t *scr)
     fp_dsc.data_size = 24 * 24;
     fp_obj = lv_image_create(scr);
     lv_image_set_src(fp_obj, &fp_dsc);
-    lv_obj_set_pos(fp_obj, 24, 172);
+    lv_image_set_scale(fp_obj, 160);          /* ~15 px */
+    lv_obj_set_pos(fp_obj, PILL_LX + 12, PILL_Y + 3);
     lv_obj_set_style_image_recolor(fp_obj, lv_color_hex(0x46D8E0), 0);
     lv_obj_set_style_image_recolor_opa(fp_obj, LV_OPA_COVER, 0);
-    label(scr, &kenney9, 0x8A94A8, 52, 170, 62, "STEPS");
-    d_lbl_steps = label(scr, &kenney24, 0x46D8E0, 52, 182, 62, "8432");
+    label_l(scr, &kenney12, 0x8A94A8, PILL_LX + 40, PILL_Y + 9, 62,
+            LV_TEXT_ALIGN_LEFT, "STEPS");
+    d_lbl_steps = label(scr, &kenney24, 0x46D8E0, PILL_LX + 3, PILL_Y + 33,
+                        PILL_W - 6, "0");
 
     heart_obj = lv_obj_create(scr);
-    lv_obj_set_pos(heart_obj, 134, 178);
+    lv_obj_set_pos(heart_obj, PILL_RX + 18, PILL_Y + 10);
     lv_obj_set_size(heart_obj, 14, 12);
     lv_obj_set_style_bg_opa(heart_obj, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(heart_obj, 0, 0);
@@ -300,11 +438,16 @@ static void build_digital(lv_obj_t *scr)
     lv_obj_remove_flag(heart_obj,
                        LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(heart_obj, heart_draw, LV_EVENT_DRAW_MAIN, NULL);
-    d_lbl_bpm = label(scr, &kenney24, 0xF0586E, 158, 178, 44, "76");
-    label(scr, &kenney9, 0x8A94A8, 182, 196, 40, "BPM");
+    label_l(scr, &kenney12, 0x8A94A8, PILL_RX + 40, PILL_Y + 9, 62,
+            LV_TEXT_ALIGN_LEFT, "BPM");
+    d_lbl_bpm = label(scr, &kenney24, 0xF0586E, PILL_RX + 3, PILL_Y + 33,
+                      PILL_W - 6, "--");
     breath_start(d_lbl_bpm);
 
     last_bpm = last_steps = last_synced = last_dom = last_min = -1;
+    d_wx_icon = -2;
+    d_mus_on = d_mus_playing = -1;
+    face_phone_refresh();
 }
 
 void ui_face_build(lv_obj_t *scr)
@@ -410,33 +553,55 @@ void ui_face_tick(void)
         }
         int steps = ui_steps();
         if (steps != last_steps) {
-            lv_snprintf(buf, sizeof buf, "%d", steps >= 0 ? steps : 0);
-            lv_label_set_text(d_lbl_steps, steps >= 0 ? buf : "--");
+            if (steps < 0)
+                lv_snprintf(buf, sizeof buf, "--");
+            else if (steps >= 100000)
+                lv_snprintf(buf, sizeof buf, "%dK", steps / 1000);
+            else
+                lv_snprintf(buf, sizeof buf, "%d", steps);
+            lv_label_set_text(d_lbl_steps, buf);
             last_steps = steps;
         }
         int sec = hal_clock_second(), min = hal_clock_minute();
-        if (min != last_min || sec != last_sec) {
-            lv_snprintf(buf, sizeof buf, "%02d:%02d",
-                        hal_clock_hour(), min);
+        int synced = hal_clock_synced();
+        if (min != last_min || sec != last_sec || synced != last_synced) {
+            if (synced)
+                lv_snprintf(buf, sizeof buf, "%02d:%02d", hal_clock_hour(), min);
+            else
+                lv_snprintf(buf, sizeof buf, "--:--");
             lv_label_set_text(d_lbl_time, buf);
             last_sec = sec;
         }
-        if (min != last_min) {
+        if (min != last_min || synced != last_synced) {
             last_min = min;
+            last_synced = synced;
             int y, mo, d, dow;
             hal_clock_date(&y, &mo, &d, &dow);
-            if (hal_clock_synced()) {
-                static const char *dn[8] = {"", "MON", "TUE", "WED",
-                                            "THU", "FRI", "SAT", "SUN"};
+            /* 2.0.1 left the build-time placeholder "FRI, OCT 24" up until
+               the phone synced the clock, which read as a wrong date */
+            if (synced) {
+                static const char *dn[8] = {"", "MONDAY", "TUESDAY",
+                                            "WEDNESDAY", "THURSDAY",
+                                            "FRIDAY", "SATURDAY", "SUNDAY"};
                 static const char *mn[13] = {"", "JAN", "FEB", "MAR",
                                              "APR", "MAY", "JUN", "JUL",
                                              "AUG", "SEP", "OCT", "NOV",
                                              "DEC"};
-                lv_snprintf(buf, sizeof buf, "%s, %s %d",
-                            dow >= 1 && dow <= 7 ? dn[dow] : "???",
-                            mo >= 1 && mo <= 12 ? mn[mo] : "???", d);
+                lv_label_set_text(d_lbl_dow,
+                                  dow >= 1 && dow <= 7 ? dn[dow] : "---");
+                lv_snprintf(buf, sizeof buf, "%d %s", d,
+                            mo >= 1 && mo <= 12 ? mn[mo] : "???");
                 lv_label_set_text(d_lbl_date, buf);
+            } else {
+                lv_label_set_text(d_lbl_dow, "TIME NOT SET");
+                lv_label_set_text(d_lbl_date, "OPEN PHONE");
             }
+        }
+        static uint32_t last_phone;
+        if (frame_ms - last_phone >= 500) {
+            last_phone = frame_ms;
+            if (face_phone_refresh())
+                lv_obj_invalidate(art_obj);
         }
         static uint32_t last_heart;
         if (frame_ms - last_heart >= 120) {

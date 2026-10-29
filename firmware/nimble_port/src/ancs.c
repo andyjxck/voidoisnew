@@ -424,6 +424,28 @@ static const ble_uuid16_t uuid_ct = BLE_UUID16_INIT(0x2A2B);
 static uint16_t cts_start_h, cts_end_h, cts_val_h;
 int ancs_cts_state(void) { return cts_state; }
 void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s);
+int phone_apply_cts(const uint8_t *t, int len);
+int ams_busy(void);
+
+/* no ANCS procedure in flight: idle, live, or parked between the
+   12 s resubscribe retries while iOS withholds notification access
+   (2.0.1 only synced the clock from IDLE/LIVE, so a phone that never
+   granted ANCS never set the time -> the face kept its placeholder
+   date, "FRI, OCT 24") */
+static int client_quiet(void)
+{
+    if (ams_busy())
+        return 0;
+    if (state == ST_LIVE || state == ST_IDLE)
+        return 1;
+    return state == ST_SUB_NS && disc_retry_at &&
+           (int32_t)(disc_retry_at - hal_millis()) > 4000;
+}
+int ancs_client_idle(void)
+{
+    return client_quiet() && cts_state != 1 && cts_state != 2 &&
+           !cts_pending_at;
+}
 
 static int cts_read_cb(uint16_t conn, const struct ble_gatt_error *error,
                        struct ble_gatt_attr *attr, void *arg)
@@ -439,14 +461,8 @@ static int cts_read_cb(uint16_t conn, const struct ble_gatt_error *error,
         cts_state = 0;
         return 0;
     }
-    int year = t[0] | (t[1] << 8);
-    if (year >= 2020 && t[2] >= 1 && t[2] <= 12 && t[3] >= 1) {
-        hal_clock_set(year, t[2], t[3], OS_MBUF_PKTLEN(attr->om) > 7 ? t[7] : 1,
-                      t[4], t[5], t[6]);
-        cts_state = 3;
-    } else {
-        cts_state = 0;
-    }
+    /* shared validation + weekday computed from the date (ble_svcs.c) */
+    cts_state = phone_apply_cts(t, 7) == 0 ? 3 : 0;
     return 0;
 }
 
@@ -503,13 +519,17 @@ void ancs_tick(void)
     /* CTS goes after the ANCS handshake settles — one GATT client
        procedure at a time on the single link */
     if (cts_pending_at && hal_millis() >= cts_pending_at &&
-        (state == ST_LIVE || state == ST_IDLE)) {
+        client_quiet()) {
         cts_pending_at = 0;
         if (cts_state == 0)
             cts_begin();
     }
     if (state > ST_IDLE && state < ST_LIVE && disc_retry_at &&
         hal_millis() > disc_retry_at) {
+        if (ams_busy() || cts_state == 1 || cts_state == 2) {
+            disc_retry_at = hal_millis() + 2000;   /* let it finish */
+            return;
+        }
         disc_retry_at = hal_millis() + 12000;
         if (state == ST_SUB_NS && h_ns_cccd)
             subscribe_ns();          /* resubscribe after an auth bounce */
@@ -517,8 +537,7 @@ void ancs_tick(void)
             ancs_begin();            /* discovery stalled: start over */
     }
     /* CTS: retry a failed read every 10 s while connected + idle */
-    if (cts_state == 0 && !cts_pending_at && a_conn &&
-        (state == ST_LIVE || state == ST_IDLE)) {
+    if (cts_state == 0 && !cts_pending_at && a_conn && client_quiet()) {
         static uint32_t cts_last_try;
         if (hal_millis() - cts_last_try > 10000) {
             cts_last_try = hal_millis();

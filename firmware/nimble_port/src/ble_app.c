@@ -47,6 +47,15 @@ void ancs_on_disconnect(void);
 void ancs_on_enc_ok(void);
 void ancs_on_notify(uint16_t attr_handle, struct os_mbuf *om);
 void ancs_tick(void);
+void ams_on_connect(uint16_t conn);
+void ams_on_disconnect(void);
+void ams_on_enc_ok(void);
+int ams_on_notify(uint16_t attr_handle, struct os_mbuf *om);
+void ams_tick(void);
+int phone_svcs_init(void);
+void phone_music_reset(void);
+static int ble_compat;          /* advertise as "InfiniTime" for InfiniLink */
+uint16_t ble_conn_handle(void) { return conn_handle; }
 int ble_store_ram_init(void);
 extern uint32_t hal_millis(void);
 
@@ -60,6 +69,7 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
             conn_handle = ev->connect.conn_handle;
             /* ANCS discovery kicks off as soon as the link settles */
             ancs_on_connect(conn_handle);
+            ams_on_connect(conn_handle);
             /* ask the phone to pair/encrypt: ANCS + CTS need it, and
                iOS only prompts when the accessory requests security.
                Deferred a beat — see sec_pending_at. */
@@ -67,6 +77,8 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
             d_sec_rc = -1;
             sec_attempts = 0;
             sec_pending_at = hal_millis() + 1500;
+            if (ble_compat)
+                ble_advertise();   /* keep InfiniLink able to see us */
         } else {
             ble_advertise();
         }
@@ -76,6 +88,8 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
         conn_handle = BLE_HS_CONN_HANDLE_NONE;
         sec_pending_at = 0;
         ancs_on_disconnect();
+        ams_on_disconnect();
+        phone_music_reset();
         ble_advertise();
         break;
     case BLE_GAP_EVENT_SUBSCRIBE:
@@ -83,12 +97,14 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
         break;
     case BLE_GAP_EVENT_NOTIFY_RX:
         /* incoming GATT notifications on client handles (ANCS NS/DS) */
-        ancs_on_notify(ev->notify_rx.attr_handle, ev->notify_rx.om);
+        if (!ams_on_notify(ev->notify_rx.attr_handle, ev->notify_rx.om))
+            ancs_on_notify(ev->notify_rx.attr_handle, ev->notify_rx.om);
         break;
     case BLE_GAP_EVENT_ENC_CHANGE:
         d_enc_status = ev->enc_change.status;
         if (ev->enc_change.status == 0) {
             ancs_on_enc_ok();
+            ams_on_enc_ok();
         }
         break;
     case BLE_GAP_EVENT_MTU:
@@ -114,16 +130,56 @@ static void ble_advertise(void)
         0xd0, 0x00, 0x2d, 0x12, 0x1e, 0x4b, 0x0f, 0xa4,
         0x99, 0x4e, 0xce, 0xb5, 0x31, 0xf4, 0x05, 0x79
     };
-    ble_gap_adv_set_data(adv, sizeof adv);
-
+    /* InfiniLink-compat: InfiniLink only lists peripherals named
+       "InfiniTime" / "Pinetime-JF". The name no longer fits next to the
+       ANCS solicitation (31 B), so it moves to the scan response. */
+    static const uint8_t adv_c[] = {
+        0x02, 0x01, 0x06,
+        0x11, 0x15,
+        0xd0, 0x00, 0x2d, 0x12, 0x1e, 0x4b, 0x0f, 0xa4,
+        0x99, 0x4e, 0xce, 0xb5, 0x31, 0xf4, 0x05, 0x79
+    };
+    static const uint8_t rsp_c[] = {
+        0x0B, 0x09, 'I', 'n', 'f', 'i', 'n', 'i', 'T', 'i', 'm', 'e'
+    };
     struct ble_gap_adv_params p;
     memset(&p, 0, sizeof p);
-    p.conn_mode = BLE_GAP_CONN_MODE_UND;
     p.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    if (ble_compat) {
+        ble_gap_adv_set_data(adv_c, sizeof adv_c);
+        ble_gap_adv_rsp_set_data(rsp_c, sizeof rsp_c);
+        /* iOS holds the link for ANCS, so while connected keep a
+           scannable, non-connectable advert up: InfiniLink's scan can
+           then find the watch and CoreBluetooth reuses the link */
+        p.conn_mode = ble_connected() ? BLE_GAP_CONN_MODE_NON
+                                      : BLE_GAP_CONN_MODE_UND;
+    } else {
+        if (ble_connected())
+            return;
+        ble_gap_adv_set_data(adv, sizeof adv);
+        p.conn_mode = BLE_GAP_CONN_MODE_UND;
+    }
     d_adv_calls++;
     d_adv_rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER,
                                  &p, gap_cb, NULL);
 }
+
+/* settings toggle; applied live */
+void ble_set_compat(int on)
+{
+    on = !!on;
+    if (on == ble_compat)
+        return;
+    ble_compat = on;
+    if (!ble_up)
+        return;
+    ble_svc_gap_device_name_set(on ? "InfiniTime" : "VoidOS");
+    if (ble_synced && ble_gap_adv_active())
+        ble_gap_adv_stop();
+    if (ble_synced)
+        ble_advertise();
+}
+int ble_get_compat(void) { return ble_compat; }
 
 static void on_sync(void)
 {
@@ -151,8 +207,9 @@ int ble_init(void)
     ble_svc_gatt_init();
     extern void ble_dfu_init(void);
     ble_dfu_init();
+    phone_svcs_init();          /* CTS server, weather, music */
     nimble_mark(11);
-    ble_svc_gap_device_name_set("VoidOS");
+    ble_svc_gap_device_name_set(ble_compat ? "InfiniTime" : "VoidOS");
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
     /* ANCS requires an encrypted link; a screenless watch can only do
@@ -227,6 +284,7 @@ void ble_poll(void)
         }
     }
     ancs_tick();
+    ams_tick();
     /* advertising watchdog: any failed/interrupted adv start (disconnect
        races, failed pairing) would otherwise leave the watch invisible */
     {
@@ -234,7 +292,7 @@ void ble_poll(void)
         uint32_t now = hal_millis();
         if (ble_synced && ble_adv_on && now - adv_check_ms > 2000) {
             adv_check_ms = now;
-            if (!ble_gap_adv_active() && !ble_connected())
+            if (!ble_gap_adv_active() && (!ble_connected() || ble_compat))
                 ble_advertise();
         }
     }

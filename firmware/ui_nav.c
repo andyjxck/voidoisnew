@@ -80,7 +80,6 @@ static int sw_running;
 static uint32_t sw_t0, sw_acc;
 static uint32_t timer_end_ms;
 static int timer_done;
-static uint32_t motor_off_at;
 static int resting_bpm;         /* lowest BPM seen this session */
 static int alarm_on = 1;
 static int alarm_h = 7, alarm_m = 0;
@@ -93,6 +92,13 @@ int ui_face_digital(void) { return face_dig; }
 
 /* navigation */
 static scr_t back_target = SCR_FACE;
+
+/* the clock came from the last save, not the phone: it is behind by
+   however long the watch was off or flashing. The face says so until a
+   phone sync or a manual SET TIME. */
+static int clock_stale;
+int clock_syncs_seen(void);
+int ui_clock_stale(void) { return clock_stale && !clock_syncs_seen(); }
 
 /* ---- persistence: settings + step history on external SPI flash ---- */
 void spi_flash_init(void);
@@ -107,14 +113,21 @@ int sensors_hr_on(void);
 void sensors_hr_set(int);
 int hal_battery_pct(void);
 void hal_motor(int);
+void ble_set_compat(int on);
+int ble_get_compat(void);
+int phone_cts_writes(void);
 
-/* haptic tick helper — intentionally a no-op. The 1.6 haptics made
-   the motor run continuously on-device; root cause under
-   investigation, so all call sites stay but do nothing until the
-   behaviour is verified. */
+static uint32_t motor_off_at;
+/* haptic tick: one short pulse, always ended by ui_tick via
+   motor_off_at (capped at 60 ms). 1.6 kept these silent because the
+   motor ran on; 2.0 found that cause (inverted motor pin) and fixed it,
+   and notifications already buzz through the same path. */
 static void buzz(int ms)
 {
-    (void)ms;
+    if (ms > 60)
+        ms = 60;
+    hal_motor(1);
+    motor_off_at = hal_millis() + (uint32_t)ms;
 }
 
 #define PERSIST_ADDR 0x3F0000u   /* top sector, clear of the DFU region */
@@ -135,6 +148,7 @@ struct persist {
     uint8_t clock_mon, clock_day, clock_dow, clock_ok;
     uint8_t face_dig;
     uint8_t hr_on;
+    uint8_t compat;              /* 2.1: advertise as InfiniTime */
 };
 static struct persist P;
 
@@ -181,6 +195,7 @@ static void persist_save(void)
     P.s_track = (uint8_t)s_track;
     P.face_dig = (uint8_t)face_dig;
     P.hr_on = (uint8_t)sensors_hr_on();
+    P.compat = (uint8_t)ble_get_compat();
     if (sensors_steps() >= 0) {      /* a dead BMA must not poison totals */
         P.steps_total = (uint32_t)ui_steps();
         P.chip_at_save = (uint32_t)sensors_steps();
@@ -231,6 +246,7 @@ static void persist_load(void)
     w_last_sets = P.last_workout_sets;
     s_track = P.s_track;
     face_dig = P.face_dig;
+    ble_set_compat(P.ver >= 5 && P.compat == 1);
     if (P.ver >= 5 && P.hr_on <= 1)
         sensors_hr_set(P.hr_on);
     else
@@ -242,19 +258,21 @@ static void persist_load(void)
         hal_clock_set(P.clock_year, P.clock_mon, P.clock_day, P.clock_dow,
                       (int)(t / 3600000u), (int)(t / 60000u % 60u),
                       (int)(t / 1000u % 60u));
+        clock_stale = 1;
     }
 }
 
 /* ---- helpers ------------------------------------------------------------ */
 
 #define C_BG     lv_color_hex(0x000000)
+/* 2.1: one palette with the face — neon cyan + red */
 #define C_PANEL  lv_color_hex(0x0B0E14)
-#define C_EDGE   lv_color_hex(0x304568)
+#define C_EDGE   lv_color_hex(0x1E4E56)
 #define C_FILL   lv_color_hex(0x151B26)
 #define C_WHITE  lv_color_white()
 #define C_MUTED  lv_color_hex(0x8890A0)
-#define C_ACCENT lv_color_hex(0x5AC8D2)
-#define C_WARN   lv_color_hex(0xEBC828)
+#define C_ACCENT lv_color_hex(0x46D8E0)
+#define C_WARN   lv_color_hex(0xF0586E)
 #define C_GOOD   lv_color_hex(0x3CC850)
 
 static lv_obj_t *mk_label(lv_obj_t *parent, const lv_font_t *font,
@@ -528,7 +546,23 @@ int ui_asleep(void) { return asleep; }
    60 s after wake even mid-interaction */
 void ui_activity(void) { last_input_ms = hal_millis(); }
 
-static int bl_level(void) { return torch_on ? 3 : 1 + brightness * 2 / 100; }
+/* the panel has three backlight steps (P0.14/22/23). 2.0.1 cycled
+   25/50/75/100 % with 1 + b*2/100, so 50 and 75 were the same step.
+   Now: LOW 30 -> MID 60 -> HIGH 100, any saved value maps sensibly. */
+static int bright_step(void) { return brightness < 45 ? 1 : brightness < 85 ? 2 : 3; }
+static void bright_cycle(void)
+{
+    int s = bright_step();
+    brightness = s == 1 ? 60 : s == 2 ? 100 : 30;
+}
+static const char *bright_name(void)
+{
+    static const char *n[4] = {"", "LOW", "MID", "HIGH"};
+    return n[bright_step()];
+}
+static int bl_level(void) { return torch_on ? 3 : bright_step(); }
+static void torch_set(int on);
+static void wlock_set(int on);
 
 void ui_wake(void)
 {
@@ -627,7 +661,7 @@ static int ccw_on(int d)
 {
     switch (d) {
     case CCW_BATT:   return 1;
-    case CCW_BRIGHT: return brightness >= 50;
+    case CCW_BRIGHT: return bright_step() >= 2;
     case CCW_DND:    return dnd_on;
     case CCW_BT:     return bt_on;
     case CCW_AIR:    return airplane_on;
@@ -642,7 +676,7 @@ static void ccw_activate(int d)
 {
     switch (d) {
     case CCW_BRIGHT:
-        brightness = brightness >= 100 ? 25 : brightness + 25;
+        bright_cycle();
         if (!torch_on)
             display_backlight(bl_level());
         break;
@@ -660,14 +694,13 @@ static void ccw_activate(int d)
         apply_radio();
         break;
     case CCW_TORCH:
-        torch_on ^= 1;
-        display_backlight(bl_level());
+        torch_set(!torch_on);
         break;
     case CCW_PHONE:
         nav_to(SCR_NOTIF);
         return;
     case CCW_LOCK:
-        water_lock ^= 1;
+        wlock_set(!water_lock);
         break;
     case CCW_SET:
         buzz(35);
@@ -760,7 +793,7 @@ static void ccw_draw(lv_event_t *e)
     if (fd == CCW_BATT)
         lv_snprintf(v, sizeof v, "%d%%", hal_battery_pct());
     else if (fd == CCW_BRIGHT)
-        lv_snprintf(v, sizeof v, "%d%%", brightness);
+        lv_snprintf(v, sizeof v, "%s", bright_name());
     else if (fd == CCW_SET)
         lv_snprintf(v, sizeof v, "OPEN");
     else if (fd == CCW_PHONE)
@@ -769,7 +802,7 @@ static void ccw_draw(lv_event_t *e)
         lv_snprintf(v, sizeof v, "%s", ccw_on(fd) ? "ON" : "OFF");
     draw_txt_c(layer, &kenney16, ccw_on(fd) ? fc : C_MUTED, 120, CC_CY - 2, v);
     if (fd == CCW_BRIGHT)
-        seg_bar(layer, 88, CC_CY + 18, 64, 6, 10, brightness, fc,
+        seg_bar(layer, 88, CC_CY + 18, 64, 6, 10, bright_step() * 100 / 3, fc,
                 lv_color_hex(0x232C3C));
     else if (fd == CCW_BATT)
         seg_bar(layer, 88, CC_CY + 18, 64, 6, 10, hal_battery_pct(), fc,
@@ -1773,7 +1806,7 @@ static void build_settings(lv_obj_t *r)
         }
         char v[8];
         if (i == 5)
-            lv_snprintf(v, sizeof v, "%d%%", brightness);
+            lv_snprintf(v, sizeof v, "%s", bright_name());
         else if (i == 9)
             lv_snprintf(v, sizeof v, ">");
         else if (i == 10)
@@ -1860,14 +1893,13 @@ static void settings_cb(lv_event_t *e)
         apply_radio();
         break;
     case 3:
-        torch_on ^= 1;
-        display_backlight(torch_on ? 3 : 1 + brightness * 2 / 100);
+        torch_set(!torch_on);
         break;
-    case 4: water_lock ^= 1; break;
+    case 4: wlock_set(!water_lock); break;
     case 5:
-        brightness = brightness >= 100 ? 25 : brightness + 25;
+        bright_cycle();
         if (!torch_on)
-            display_backlight(1 + brightness * 2 / 100);
+            display_backlight(bl_level());
         break;
     case 6: cc_hide ^= 1; break;
     case 7: cc_hide ^= 2; break;
