@@ -178,10 +178,10 @@ static void build_weather(lv_obj_t *r)
                                 "SAT", "SUN"};
     for (int i = 0; i < n; i++) {
         int cx = 12 + i * cw + cw / 2;
-        if (i == 0)
-            lv_snprintf(b, sizeof b, "TODAY");
-        else if (dow >= 1 && dow <= 7)
+        if (dow >= 1 && dow <= 7)
             lv_snprintf(b, sizeof b, "%s", dn[(dow - 1 + i) % 7 + 1]);
+        else if (i == 0)
+            lv_snprintf(b, sizeof b, "NOW");
         else
             lv_snprintf(b, sizeof b, "+%d", i);
         mk_label_c(r, &kenney12, i == 0 ? C_ACCENT : C_MUTED, cx, 148, b);

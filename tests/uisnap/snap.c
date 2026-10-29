@@ -71,6 +71,8 @@ static void settle(void)
     for (int i = 0; i < 20; i++) {
         now_ms += 50;
         lv_timer_handler();
+        if (cur == SCR_FACE)
+            ui_face_tick();          /* the firmware's ui_tick does this */
     }
     lv_obj_invalidate(lv_screen_active());
     lv_refr_now(NULL);
@@ -220,6 +222,8 @@ static void shot(const char *dir, scr_t s, const char *name)
     snprintf(path, sizeof path, "%s/%s.txt", dir, name);
     audit = fopen(path, "w");
     walk(lv_screen_active(), 0);
+    if (lv_obj_get_child_count(lv_layer_top()))
+        walk(lv_layer_top(), 0);
     {
         static const char *lcn[LC_N], *ccn[CCW_DEFN], *stn[16];
         for (int i = 0; i < LC_N; i++) lcn[i] = lc_apps[i].name;
@@ -264,13 +268,42 @@ int main(int argc, char **argv)
     snap_bpm = 0; shot(dir, SCR_FACE, "02_face_measuring");
     snap_hr_on = 0; shot(dir, SCR_FACE, "03_face_hr_off");
     snap_hr_on = 1; snap_bpm = 72;
+    /* 2.1 face states: music chip, no weather, unsynced / restored clock */
+    snap_music_data.playing = 0; shot(dir, SCR_FACE, "04_face_no_music");
+    snap_music_data.playing = 1;
+    snap_wx_on = 0; shot(dir, SCR_FACE, "05_face_no_weather"); snap_wx_on = 1;
+    snap_synced = 0; snap_restored = 1;
+    shot(dir, SCR_FACE, "06_face_clock_restored");
+    snap_restored = 0; shot(dir, SCR_FACE, "07_face_clock_unset");
+    snap_synced = 1;
+    shot(dir, SCR_WEATHER, "30_weather");
+    snap_wx_data.ndays = 0; shot(dir, SCR_WEATHER, "31_weather_no_forecast");
+    snap_wx_data.ndays = 5;
+    snap_wx_on = 0; shot(dir, SCR_WEATHER, "32_weather_placeholder");
+    snap_wx_on = 1;
+    shot(dir, SCR_MUSIC, "33_music_playing");
+    snap_music_data.playing = 0; shot(dir, SCR_MUSIC, "34_music_paused");
+    snap_music_data.playing = 1;
+    /* overlays live on the top layer, over whatever screen is up */
+    torch_set(1); shot(dir, SCR_FACE, "35_torch_on"); torch_set(0);
+    wlock_set(1); shot(dir, SCR_FACE, "36_water_lock_notice");
+    wlock_set(0);
     shot(dir, SCR_LAUNCHER, "10_launcher");
     shot(dir, SCR_CC, "11_cc");
     cc_hide = 7; shot(dir, SCR_CC, "11_cc_min"); cc_hide = 0;
     for (int f = 0; f < CCW_DEFN; f++) {     /* hub contents per control */
-        ccw_focus = f; char nm[24]; snprintf(nm, sizeof nm, "11_cc_f%d", f);
-        cur_name = nm; ntgt = 0; cur = SCR_CC; rebuild(); settle();
+        ccw_focus = f; char nm[40];
+        snprintf(nm, sizeof nm, "11_cc_f%d_%s", f, ccw_def[f].name);
+        for (char *q = nm; *q; q++)
+            if (*q == ' ') *q = '_';
+        shot(dir, SCR_CC, nm);
     }
+    /* toggles switched the other way, low brightness */
+    dnd_on = 1; airplane_on = 1; bt_on = 0; brightness = 30;
+    ccw_focus = 2; shot(dir, SCR_CC, "11_cc_toggles_flipped");
+    dnd_on = 0; airplane_on = 0; bt_on = 1; brightness = 100;
+    torch_set(1); ccw_focus = 5; shot(dir, SCR_CC, "11_cc_torch_on");
+    torch_set(0);
     ccw_focus = 0;
     for (int f = 0; f < LC_N; f++) {
         lc_focus = f; char nm[24]; snprintf(nm, sizeof nm, "10_launcher_f%d", f);

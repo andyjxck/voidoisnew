@@ -38,13 +38,16 @@ void hal_clock_date(int *y, int *mo, int *d, int *dow)
 static int snap_synced = 1, snap_restored;
 int hal_clock_synced(void) { return snap_synced; }
 int hal_clock_restored(void) { return snap_restored; }
+void hal_clock_restore(int y, int mo, int d, int dow, int h, int mi, int s)
+{ (void)y; (void)mo; (void)d; (void)dow; (void)h; (void)mi; (void)s; }
 uint32_t hal_clock_tod_ms(void) { return 30 * 60000; }
 int hal_battery_pct(void) { return 81; }
 int hal_battery_raw(void) { return 3300; }
 int hal_boot_confirmed(void) { return 1; }
 void hal_motor(int on) { (void)on; }
 uint32_t button_held_ms(void) { return 0; }
-int ble_connected(void) { return 1; }
+static int snap_ble = 1;
+int ble_connected(void) { return snap_ble; }
 void ble_set_enabled(int on) { (void)on; }
 int ble_status(void) { return 2; }
 int ble_dfu_busy(void) { return 0; }

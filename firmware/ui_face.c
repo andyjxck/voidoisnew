@@ -13,6 +13,7 @@ int ui_steps(void);
 int sensors_ppg(int i, int *out_y100);
 int sensors_hrs_ok(void);
 int hal_clock_synced(void);
+int hal_clock_restored(void);
 int ui_face_digital(void);
 int phone_take_face_dirty(void);
 void hal_clock_date(int *y, int *mo, int *d, int *dow);
@@ -335,7 +336,12 @@ static int face_phone_refresh(void)
             lv_snprintf(b, sizeof b, "%d", t);
             lv_label_set_text(d_wx_temp, b);
             lv_obj_set_style_text_color(d_wx_temp, lv_color_white(), 0);
-            lv_label_set_text(d_wx_city, wx_name(w->icon));
+            /* the icon already says the sky; the 12 px line has room
+               for today's range, not "FEW CLOUDS" */
+            int hi = w->tmax >= 0 ? (w->tmax + 50) / 100 : -((-w->tmax + 50) / 100);
+            int lo = w->tmin >= 0 ? (w->tmin + 50) / 100 : -((-w->tmin + 50) / 100);
+            lv_snprintf(b, sizeof b, "H%d L%d", hi, lo);
+            lv_label_set_text(d_wx_city, b);
         } else {
             lv_label_set_text(d_wx_temp, "--");
             lv_obj_set_style_text_color(d_wx_temp, lv_color_hex(0x5A6478), 0);
@@ -384,7 +390,7 @@ static void build_digital(lv_obj_t *scr)
     d_wx_hit = hit(scr, 6, CHIP_Y, 108, CHIP_H, 1);
     d_wx_temp = label_l(scr, &kenney16, 0xFFFFFF, 46, CHIP_Y + 6, 60,
                         LV_TEXT_ALIGN_LEFT, "--");
-    d_wx_city = label_l(scr, &kenney9, 0x8A94A8, 46, CHIP_Y + 26, 64,
+    d_wx_city = label_l(scr, &kenney12, 0x8A94A8, 46, CHIP_Y + 24, 66,
                         LV_TEXT_ALIGN_LEFT, "NO DATA");
     lv_obj_remove_flag(d_wx_temp, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(d_wx_city, LV_OBJ_FLAG_CLICKABLE);
@@ -402,7 +408,7 @@ static void build_digital(lv_obj_t *scr)
     d_mus_lbl = label_l(d_mus_hit, &kenney12, 0xFFFFFF, 46, 7, 150,
                         LV_TEXT_ALIGN_LEFT, "");
     lv_label_set_long_mode(d_mus_lbl, LV_LABEL_LONG_DOT);
-    lv_obj_t *np = label_l(d_mus_hit, &kenney9, 0xF0586E, 46, 23, 150,
+    lv_obj_t *np = label_l(d_mus_hit, &kenney12, 0xF0586E, 46, 22, 150,
                            LV_TEXT_ALIGN_LEFT, "NOW PLAYING");
     lv_obj_remove_flag(np, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(d_mus_hit, LV_OBJ_FLAG_HIDDEN);
@@ -561,13 +567,17 @@ void ui_face_tick(void)
             last_steps = steps;
         }
         int sec = hal_clock_second(), min = hal_clock_minute();
-        int synced = hal_clock_synced();
+        /* 1 synced, 2 restored after a reboot/flash (shown grey, never
+           trusted), 0 never set */
+        int synced = hal_clock_synced() ? 1 : hal_clock_restored() ? 2 : 0;
         if (min != last_min || sec != last_sec || synced != last_synced) {
             if (synced)
                 lv_snprintf(buf, sizeof buf, "%02d:%02d", hal_clock_hour(), min);
             else
                 lv_snprintf(buf, sizeof buf, "--:--");
             lv_label_set_text(d_lbl_time, buf);
+            lv_obj_set_style_text_color(d_lbl_time,
+                lv_color_hex(synced == 2 ? 0x8A93A0 : 0xFFFFFF), 0);
             last_sec = sec;
         }
         if (min != last_min || synced != last_synced) {
@@ -577,7 +587,10 @@ void ui_face_tick(void)
             hal_clock_date(&y, &mo, &d, &dow);
             /* 2.0.1 left the build-time placeholder "FRI, OCT 24" up until
                the phone synced the clock, which read as a wrong date */
-            if (synced) {
+            if (synced == 2) {
+                lv_label_set_text(d_lbl_dow, "SYNCING TIME");
+                lv_label_set_text(d_lbl_date, "OPEN PHONE");
+            } else if (synced) {
                 static const char *dn[8] = {"", "MONDAY", "TUESDAY",
                                             "WEDNESDAY", "THURSDAY",
                                             "FRIDAY", "SATURDAY", "SUNDAY"};

@@ -120,6 +120,10 @@ static void ble_advertise(void)
 {
     if (!ble_adv_on)
         return;
+    /* a non-connectable compat advert can still be up when the link
+       drops; restart it as connectable or nobody can reconnect */
+    if (ble_gap_adv_active())
+        ble_gap_adv_stop();
     /* raw adv data: flags, name, and the ANCS service-solicitation UUID
        (AD type 0x15) — the Apple convention that makes iOS list and
        pair the accessory and grant it notification access */

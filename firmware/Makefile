@@ -18,7 +18,7 @@ CFLAGS  = $(ARCH) -std=c11 -Os -g -ffunction-sections -fdata-sections \
 LDFLAGS = $(ARCH) -T link.ld -Wl,--gc-sections -Wl,-Map=voidos-app.map \
           -specs=nano.specs -Wl,--no-warn-rwx-segments
 
-VERSION ?= 2.0.1
+VERSION ?= 2.1.0
 BIN      = voidos-app.bin
 IMG      = voidos-app-image.bin
 ZIP      = voidos-dfu-$(VERSION).zip
