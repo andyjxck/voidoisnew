@@ -35,7 +35,7 @@ OBJS = startup.o main.o syscalls.o hal_sys.o hal_display.o lvgl_port.o \
        ui_face.o ui_nav.o sensors.o spi_flash.o \
        nimble_port/src/ble_dfu.o nimble_port/src/ancs.o nimble_port/src/ble_svcs.o nimble_port/src/ams.o \
        nimble_port/src/ble_bond_store.o nimble_port/src/bondblob.o \
-       gen/kenney_lvgl.o gen/assets_data.o $(LVGL_OBJS) \
+       gen/kenney_lvgl.o gen/assets_data.o gen/micons.o $(LVGL_OBJS) \
        nimble_port/src/npl_baremetal.o nimble_port/src/glue.o \
        nimble_port/src/ble_app.o $(NIMBLE_OBJS)
 
@@ -80,10 +80,14 @@ nimble_port/include/syscfg/syscfg.h: tools/gen_syscfg.py
 
 all: $(ZIP) size
 
-gen/assets_data.c gen/kenney_lvgl.c &: tools/gen_assets.py ../assets/fonts/Kenney\ Future.ttf
+MICON_PNGS := $(wildcard ../assets/micons/*.png)
+gen/assets_data.c gen/kenney_lvgl.c gen/micons.c gen/micons.h &: tools/gen_assets.py tools/micons_list.py $(MICON_PNGS) ../assets/fonts/Kenney\ Future.ttf
 	$(PYTHON) tools/gen_assets.py
 
 gen/kenney_lvgl.o: gen/kenney_lvgl.c lv_conf.h
+	$(CC) $(CFLAGS) -Ivendor -Ivendor/lvgl -DLV_CONF_INCLUDE_SIMPLE -c $< -o $@
+
+gen/micons.o: gen/micons.c gen/micons.h lv_conf.h
 	$(CC) $(CFLAGS) -Ivendor -Ivendor/lvgl -DLV_CONF_INCLUDE_SIMPLE -c $< -o $@
 
 gen/assets_data.o: gen/assets_data.c assets.h
@@ -114,7 +118,7 @@ gen/flags.stamp: FORCE
 	@mkdir -p gen
 	@echo '$(FLAGS_SIG)' | md5sum > $@.tmp
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; echo "compiler flags changed: full rebuild"; fi
-$(OBJS): gen/flags.stamp | gen/version.h
+$(OBJS): gen/flags.stamp | gen/version.h gen/micons.h
 
 # hand-written peripheral register offsets must match the Nordic MDK
 gen/regcheck.ok: hal_regcheck.c hal_saadc.h

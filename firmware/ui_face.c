@@ -234,9 +234,6 @@ static int heart_needs_redraw(void)
 
 static void heart_draw(lv_event_t *ev)
 {
-    static const char shape[6][8] = {
-        ".XX.XX.", "XXXXXXX", "XXXXXXX", ".XXXXX.", "..XXX..", "...X..."
-    };
     lv_layer_t *layer = lv_event_get_layer(ev);
     lv_area_t area;
     lv_obj_get_coords(lv_event_get_target(ev), &area);
@@ -253,16 +250,10 @@ static void heart_draw(lv_event_t *ev)
     } else {
         lit = ((int)(frame_ms / 110) % 8) < 2;
     }
-    lv_draw_fill_dsc_t fill;
-    lv_draw_fill_dsc_init(&fill);
-    fill.color = lv_color_hex(stale ? BPM_STALE_RGB : lit ? 0xFF9898 : 0xE63C3C);
-    for (int y = 0; y < 6; y++)
-        for (int x = 0; x < 7; x++) {
-            if (shape[y][x] != 'X') continue;
-            lv_area_t pixel = {area.x1 + x * 2, area.y1 + y * 2,
-                               area.x1 + x * 2 + 1, area.y1 + y * 2 + 1};
-            lv_draw_fill(layer, &fill, &pixel);
-        }
+    /* Material Symbols "favorite", 16 px */
+    mi_draw(layer, MI_FAVORITE, (area.x1 + area.x2 + 1) / 2,
+            (area.y1 + area.y2 + 1) / 2, 16,
+            lv_color_hex(stale ? BPM_STALE_RGB : lit ? 0xFF9898 : 0xE63C3C));
 }
 
 static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font,
@@ -308,13 +299,6 @@ int ui_water_ml(void);             /* ui_nav.c: today's water */
 #define WT_BAR_W 66
 #define WT_BAR_Y (CHIP_Y + 29)
 
-/* water drop: a triangle on a disc */
-static void dk_drop(lv_layer_t *l, int cx, int cy, int s, lv_color_t c)
-{
-    dk_tri(l, cx, cy - s, cx - s * 3 / 4, cy + s / 4, cx + s * 3 / 4,
-           cy + s / 4, c, LV_OPA_COVER);
-    dk_arc(l, cx, cy + s / 4, s * 3 / 4, s * 3 / 4, 0, 360, c);
-}
 void ui_music_ascii(char *dst, const char *src, int cap);
 
 static void digi_draw(lv_event_t *ev)
@@ -323,7 +307,7 @@ static void digi_draw(lv_event_t *ev)
     /* water chip: drop, today's millilitres, progress to the goal */
     int wt = d_wt_ml < 0 ? 0 : d_wt_ml;
     dk_oct(l, 6, CHIP_Y, 108, CHIP_H, 9, DK_CYAN, 1, 28);
-    dk_drop(l, 24, CHIP_Y + CHIP_H / 2 - 1, 9, DK_CYAN);
+    mi_draw(l, MI_WATER_DROP, 24, CHIP_Y + CHIP_H / 2 - 1, 20, DK_CYAN);
     dk_rect(l, WT_BAR_X, WT_BAR_Y, WT_BAR_X + WT_BAR_W - 1, WT_BAR_Y + 3,
             DK_DIM, LV_OPA_COVER);
     {
@@ -478,28 +462,17 @@ static void build_digital(lv_obj_t *scr)
     lv_obj_add_flag(d_mus_hit, LV_OBJ_FLAG_HIDDEN);
 
     /* steps pill: footprint + STEPS label row, value row below */
-    static lv_image_dsc_t fp_dsc;
-    fp_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-    fp_dsc.header.w = 24;
-    fp_dsc.header.h = 24;
-    fp_dsc.header.cf = LV_COLOR_FORMAT_A8;
-    fp_dsc.header.stride = 24;
-    fp_dsc.data = icon_alpha[14];
-    fp_dsc.data_size = 24 * 24;
-    fp_obj = lv_image_create(scr);
-    lv_image_set_src(fp_obj, &fp_dsc);
-    lv_image_set_scale(fp_obj, 160);          /* ~15 px */
-    lv_obj_set_pos(fp_obj, PILL_LX + 12, PILL_Y + 3);
-    lv_obj_set_style_image_recolor(fp_obj, lv_color_hex(0x46D8E0), 0);
-    lv_obj_set_style_image_recolor_opa(fp_obj, LV_OPA_COVER, 0);
+    /* Material Symbols "footprint" baked at 16 px: no run-time scaling */
+    fp_obj = mi_obj(scr, MI_FOOTPRINT, 16, lv_color_hex(0x46D8E0),
+                    PILL_LX + 16, PILL_Y + 7);
     label_l(scr, &kenney12, 0x8A94A8, PILL_LX + 40, PILL_Y + 9, 62,
             LV_TEXT_ALIGN_LEFT, "STEPS");
     d_lbl_steps = label(scr, &kenney24, 0x46D8E0, PILL_LX + 3, PILL_Y + 33,
                         PILL_W - 6, "0");
 
     heart_obj = lv_obj_create(scr);
-    lv_obj_set_pos(heart_obj, PILL_RX + 18, PILL_Y + 10);
-    lv_obj_set_size(heart_obj, 14, 12);
+    lv_obj_set_pos(heart_obj, PILL_RX + 17, PILL_Y + 8);
+    lv_obj_set_size(heart_obj, 16, 16);
     lv_obj_set_style_bg_opa(heart_obj, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(heart_obj, 0, 0);
     lv_obj_set_style_pad_all(heart_obj, 0, 0);
@@ -555,19 +528,7 @@ void ui_face_build(lv_obj_t *scr)
     label(scr, &kenney9, 0x59647B, 90, 50, 60, "VOIDOS");
     /* steps complication: footprint icon + bare number, no "STEPS";
        the pair recentres itself in the tick as digits change */
-    static lv_image_dsc_t fp_dsc;
-    fp_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-    fp_dsc.header.w = 24;
-    fp_dsc.header.h = 24;
-    fp_dsc.header.cf = LV_COLOR_FORMAT_A8;
-    fp_dsc.header.stride = 24;
-    fp_dsc.data = icon_alpha[14];
-    fp_dsc.data_size = 24 * 24;
-    fp_obj = lv_image_create(scr);
-    lv_image_set_src(fp_obj, &fp_dsc);
-    lv_obj_set_pos(fp_obj, 88, 62);
-    lv_obj_set_style_image_recolor(fp_obj, lv_color_hex(0x8890A0), 0);
-    lv_obj_set_style_image_recolor_opa(fp_obj, LV_OPA_COVER, 0);
+    fp_obj = mi_obj(scr, MI_FOOTPRINT, 24, lv_color_hex(0x8890A0), 88, 62);
     lbl_steps = label(scr, &kenney9, 0x8890A0, 116, 66, 60, "--");
     lv_obj_set_width(lbl_steps, LV_SIZE_CONTENT);
     lv_obj_set_style_text_align(lbl_steps, LV_TEXT_ALIGN_LEFT, 0);
@@ -576,8 +537,8 @@ void ui_face_build(lv_obj_t *scr)
     last_bpm = last_steps = last_synced = last_dom = last_min = -1;
     prev_hand.x1 = prev_hand.x2 = 0;
     heart_obj = lv_obj_create(scr);
-    lv_obj_set_pos(heart_obj, 96, 172);
-    lv_obj_set_size(heart_obj, 14, 12);
+    lv_obj_set_pos(heart_obj, 95, 170);
+    lv_obj_set_size(heart_obj, 16, 16);
     lv_obj_set_style_bg_opa(heart_obj, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(heart_obj, 0, 0);
     lv_obj_set_style_pad_all(heart_obj, 0, 0);

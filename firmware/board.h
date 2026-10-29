@@ -101,6 +101,8 @@ void spi_flash_init(void);
 void spi_flash_read(uint32_t addr, uint8_t *buf, unsigned len);
 void spi_flash_write(uint32_t addr, const uint8_t *buf, unsigned len);
 void spi_flash_sector_erase(uint32_t addr);
+void spi_flash_sector_erase_start(uint32_t addr);
+int spi_flash_busy(void);
 void ble_dfu_init(void);
 
 /* touch bring-up diagnostics (rendered as an overlay by main) */

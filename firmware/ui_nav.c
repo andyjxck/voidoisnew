@@ -233,8 +233,24 @@ static void persist_mark(void)
     persist_dirty_ms = hal_millis();
 }
 
-static void persist_save(void)
+/* background-save state (persist_save_x(0) / persist_poll) */
+static struct persist persist_rec;
+static struct persist_tail persist_rec_tail;
+static uint32_t persist_pend_addr;
+static int persist_pend_slot, persist_pending;
+static void persist_poll(void);
+
+static void persist_save_x(int sync)
 {
+    if (persist_pending)       /* finish the one in flight first */
+        persist_poll();
+    if (persist_pending) {     /* still erasing */
+        if (!sync)
+            return;            /* stays dirty: retried next tick */
+        while (spi_flash_busy())
+            ;
+        persist_poll();
+    }
     persist_dirty = 0;
     P.magic = 0x564F4944u;
     P.ver = 6;
@@ -278,10 +294,45 @@ static void persist_save(void)
     int slot = persist_slot ^ 1;
     uint32_t a = slot ? PERSIST_ADDR_B : PERSIST_ADDR;
     spi_flash_init();
+    if (!sync) {
+        /* 2.2.4: the 4 KB erase (up to ~300 ms) ran on the UI thread and
+           froze taps 2 s after every settings change. Start it and let
+           persist_poll() write the record once the chip is done; the
+           record is a snapshot taken now, so later changes only re-mark
+           dirty. The other slot keeps the previous good record meanwhile. */
+        persist_rec = P;
+        persist_rec_tail = t;
+        persist_pend_addr = a;
+        persist_pend_slot = slot;
+        persist_pending = 1;
+        spi_flash_sector_erase_start(a);
+        return;
+    }
+    persist_pending = 0;
     spi_flash_sector_erase(a);
     spi_flash_write(a, (const uint8_t *)&P, sizeof P);
     spi_flash_write(a + sizeof P, (const uint8_t *)&t, sizeof t);
     persist_slot = slot;
+}
+
+/* finish a background save once the erase is done: two page programs,
+   ~1 ms. Called every ui_tick. */
+static void persist_poll(void)
+{
+    if (!persist_pending || spi_flash_busy())
+        return;
+    persist_pending = 0;
+    spi_flash_write(persist_pend_addr, (const uint8_t *)&persist_rec,
+                    sizeof persist_rec);
+    spi_flash_write(persist_pend_addr + sizeof persist_rec,
+                    (const uint8_t *)&persist_rec_tail,
+                    sizeof persist_rec_tail);
+    persist_slot = persist_pend_slot;
+}
+
+static void persist_save(void)
+{
+    persist_save_x(1);
 }
 
 /* 1 if the record at a is complete and its CRC checks; *seq gets its
@@ -728,9 +779,16 @@ static void dir_nav(int cst_dir, int start_x)
     }
 }
 
+static int chg_visible(void);        /* ui_charge.inc */
+static void chg_hide(void);
+
 int ui_swipe(int cst_dir, int start_x)
 {
     last_swipe_ms = hal_millis();
+    if (chg_visible()) {           /* any swipe closes the battery screen */
+        chg_hide();
+        return 1;
+    }
     /* the honeycomb is dragged with the finger: horizontal hardware
        gestures are the tail of a focus drag and stay drags; vertical
        ones mean "back to the face" */
@@ -789,37 +847,17 @@ void ui_wake(void)
    face, so there is no tap_cb. Root stays clickable only so the CST816S
    events still flow through the indev to child buttons. */
 
-/* ---- baked material icons (assets/fonts PNGs -> icon_alpha[][]) ----------- */
+/* ---- Google Material Symbols (micons.h) ---------------------------------- */
 
 #include "assets.h"
+#include "micons.h"
 
-static lv_image_dsc_t icon_dsc[15];
-static int icon_dsc_ready;
-
-/* icon_alpha order (tools/gen_assets.py ICONS):
-   0 dnd_on 1 flight 2 bt 3 torch_on 4 phone_vibrate 5 water_drop
-   6 settings 7 light_mode 8 battery 9 dnd_off 10 airplane_off
-   11 bt_off 12 torch_off 13 cloud 14 footprint */
-static void icon_dsc_init(void)
-{
-    for (int i = 0; i < 15; i++) {
-        icon_dsc[i].header.magic = LV_IMAGE_HEADER_MAGIC;
-        icon_dsc[i].header.w = 24;
-        icon_dsc[i].header.h = 24;
-        icon_dsc[i].header.cf = LV_COLOR_FORMAT_A8;
-        icon_dsc[i].header.stride = 24;
-        icon_dsc[i].data = icon_alpha[i];
-        icon_dsc[i].data_size = sizeof icon_alpha[i];
-    }
-    icon_dsc_ready = 1;
-}
-
-/* vector app/control glyphs — no PNG assets needed */
+/* app/control glyphs: Google Material Symbols, see glyph_icon() */
 enum {
     G_WORKOUT, G_CARDIO, G_STATS, G_SLEEP, G_WATER, G_CLOCK,
     G_ALERTS, G_SETTINGS, G_DIAG, G_PHONE,
     G_BATT, G_SUN, G_BT, G_PLANE, G_TORCH, G_STEPS, G_BOLT,
-    G_MUSIC
+    G_MUSIC, G_DND, G_WLOCK, G_FIRE
 };
 static void hex_stroke(lv_layer_t *layer, int cx, int cy, int r,
                        lv_color_t c, int w);
@@ -829,19 +867,6 @@ static void draw_txt_c(lv_layer_t *layer, const lv_font_t *f, lv_color_t c,
                        int cx, int y, const char *s);
 static void draw_glyph(lv_layer_t *layer, int g, int cx, int cy, int s,
                        lv_color_t c);
-
-/* positional icon by raw icon_alpha index — for badges and empty states */
-static lv_obj_t *mk_icon_at(lv_obj_t *parent, int idx, int on, int x, int y)
-{
-    if (!icon_dsc_ready)
-        icon_dsc_init();
-    lv_obj_t *img = lv_image_create(parent);
-    lv_image_set_src(img, &icon_dsc[idx]);
-    lv_obj_set_style_image_recolor(img, on ? C_ACCENT : C_MUTED, 0);
-    lv_obj_set_style_image_recolor_opa(img, LV_OPA_COVER, 0);
-    lv_obj_set_pos(img, x, y);
-    return img;
-}
 
 /* ---- control centre ------------------------------------------------------
    A focus wheel like the apps screen: satellites pick the control, the
@@ -854,12 +879,12 @@ static const struct { const char *name; int glyph; lv_color_t col; }
     ccw_def[CCW_DEFN] = {
     {"BATT",    G_BATT,     LV_COLOR_MAKE(0x46,0xD8,0xE0)},
     {"BRIGHT",  G_SUN,      LV_COLOR_MAKE(0xF0,0xD0,0x40)},
-    {"DND",     G_SLEEP,    LV_COLOR_MAKE(0x70,0x40,0xC8)},
+    {"DND",     G_DND,       LV_COLOR_MAKE(0x70,0x40,0xC8)},
     {"BT",      G_BT,       LV_COLOR_MAKE(0x28,0x70,0xDC)},
     {"AIR",     G_PLANE,    LV_COLOR_MAKE(0xDC,0x82,0x1E)},
     {"TORCH",   G_TORCH,    LV_COLOR_MAKE(0xC8,0xA0,0x1E)},
     {"ALERTS",  G_PHONE,    LV_COLOR_MAKE(0x28,0x70,0xDC)},
-    {"WTR LCK", G_WATER,    LV_COLOR_MAKE(0x1E,0x96,0xBE)},
+    {"WTR LCK", G_WLOCK,     LV_COLOR_MAKE(0x1E,0x96,0xBE)},
     {"SETTING", G_SETTINGS, LV_COLOR_MAKE(0x8A,0x94,0xA8)},
 };
 static int ccw_list[CCW_DEFN], ccw_n, ccw_focus;
@@ -882,9 +907,15 @@ static int ccw_on(int d)
     return 0;
 }
 
+static void chg_open(void);          /* ui_charge.inc */
+
 static void ccw_activate(int d)
 {
     switch (d) {
+    case CCW_BATT:                  /* the battery / charging screen */
+        buzz(20);
+        chg_open();
+        return;
     case CCW_BRIGHT:
         bright_cycle();
         if (!torch_on)
@@ -1122,304 +1153,43 @@ static void draw_txt_c(lv_layer_t *layer, const lv_font_t *f, lv_color_t c,
     draw_txt(layer, f, c, cx - 100, y, 200, s, LV_TEXT_ALIGN_CENTER);
 }
 
-/* each glyph ~size s centred on cx,cy */
+/* Every glyph is a Google Material Symbol (micons.h). s is the old
+   half-size: the hand-drawn glyphs spanned ~2s, a Material icon's art
+   spans 20/24 of its box, so the box is ~2.4s. */
+int hal_charging(void);
+int hal_on_charger(void);
+static int glyph_icon(int g)
+{
+    switch (g) {
+    case G_WORKOUT:  return MI_FITNESS;
+    case G_CARDIO:   return MI_FAVORITE;
+    case G_STATS:    return MI_STATS;
+    case G_SLEEP:    return MI_BEDTIME;
+    case G_WATER:    return MI_WATER_DROP;
+    case G_CLOCK:    return MI_ALARM;
+    case G_ALERTS:   return MI_NOTIFICATIONS;
+    case G_SETTINGS: return MI_SETTINGS;
+    case G_DIAG:     return MI_MONITOR_HEART;
+    case G_PHONE:    return MI_SMARTPHONE;
+    case G_BATT:     return mi_battery(hal_battery_pct(), hal_on_charger());
+    case G_SUN:      return MI_LIGHT_MODE;
+    case G_BT:       return MI_BLUETOOTH;
+    case G_PLANE:    return MI_FLIGHT;
+    case G_TORCH:    return MI_FLASHLIGHT;
+    case G_STEPS:    return MI_FOOTPRINT;
+    case G_BOLT:     return MI_BOLT;
+    case G_MUSIC:    return MI_MUSIC_NOTE;
+    case G_DND:      return MI_DND;
+    case G_WLOCK:    return MI_WATER_LOCK;
+    case G_FIRE:     return MI_FIRE;
+    default:         return -1;
+    }
+}
+
 static void draw_glyph(lv_layer_t *layer, int g, int cx, int cy, int s,
                        lv_color_t c)
 {
-    lv_draw_line_dsc_t ln;
-    lv_draw_line_dsc_init(&ln);
-    ln.color = c;
-    ln.width = 2;
-    ln.round_end = 1;
-    lv_draw_rect_dsc_t rc;
-    lv_draw_rect_dsc_init(&rc);
-    rc.bg_opa = LV_OPA_COVER;
-    rc.bg_color = c;
-    switch (g) {
-    case G_MUSIC:
-        dk_music(layer, DK_M_NOTE, cx, cy, s, c);
-        break;
-    case G_WORKOUT: {                      /* dumbbell */
-        lv_area_t p1 = {cx - s, cy - s / 2, cx - s + 3, cy + s / 2};
-        lv_area_t p2 = {cx - s + 5, cy - s + 2, cx - s + 7, cy + s - 2};
-        lv_area_t p3 = {cx + s - 7, cy - s + 2, cx + s - 5, cy + s - 2};
-        lv_area_t p4 = {cx + s - 3, cy - s / 2, cx + s, cy + s / 2};
-        lv_draw_rect(layer, &rc, &p1);
-        lv_draw_rect(layer, &rc, &p2);
-        lv_draw_rect(layer, &rc, &p3);
-        lv_draw_rect(layer, &rc, &p4);
-        ln.p1.x = cx - s + 4; ln.p1.y = cy;
-        ln.p2.x = cx + s - 4; ln.p2.y = cy;
-        ln.width = 3;
-        lv_draw_line(layer, &ln);
-        break;
-    }
-    case G_CARDIO: {                       /* heart, 7x6 shape scaled */
-        static const char sh[6][8] = {
-            ".XX.XX.", "XXXXXXX", "XXXXXXX", ".XXXXX.", "..XXX..", "...X..."
-        };
-        int px2 = s * 2 / 7;
-        if (px2 < 2)
-            px2 = 2;
-        for (int yy = 0; yy < 6; yy++)
-            for (int xx = 0; xx < 7; xx++) {
-                if (sh[yy][xx] != 'X')
-                    continue;
-                lv_area_t p = {cx - 7 * px2 / 2 + xx * px2,
-                               cy - 3 * px2 + yy * px2,
-                               cx - 7 * px2 / 2 + xx * px2 + px2 - 1,
-                               cy - 3 * px2 + yy * px2 + px2 - 1};
-                lv_draw_rect(layer, &rc, &p);
-            }
-        break;
-    }
-    case G_STATS: {                        /* bars */
-        int bw = s * 2 / 5;
-        const int ht[3] = {s, s * 3 / 2, s * 2};
-        for (int i = 0; i < 3; i++) {
-            lv_area_t b = {cx - s + i * (bw + 3), cy + s - ht[i],
-                           cx - s + i * (bw + 3) + bw, cy + s};
-            lv_draw_rect(layer, &rc, &b);
-        }
-        break;
-    }
-    case G_SLEEP: {                        /* crescent moon */
-        lv_draw_arc_dsc_t ar;
-        lv_draw_arc_dsc_init(&ar);
-        ar.center.x = cx;
-        ar.center.y = cy;
-        ar.radius = s;
-        ar.width = s * 2;
-        ar.color = c;
-        ar.start_angle = 0;
-        ar.end_angle = 360;
-        lv_draw_arc(layer, &ar);
-        ar.center.x = cx + s / 2;
-        ar.center.y = cy - s / 3;
-        ar.radius = s - 1;
-        ar.width = s * 2;
-        ar.color = lv_color_black();
-        lv_draw_arc(layer, &ar);
-        break;
-    }
-    case G_WATER: {                        /* droplet: triangle + arc */
-        lv_draw_triangle_dsc_t tr;
-        lv_draw_triangle_dsc_init(&tr);
-        tr.color = c;
-        tr.p[0].x = cx;
-        tr.p[0].y = cy - s;
-        tr.p[1].x = cx - s * 3 / 4;
-        tr.p[1].y = cy + s / 4;
-        tr.p[2].x = cx + s * 3 / 4;
-        tr.p[2].y = cy + s / 4;
-        lv_draw_triangle(layer, &tr);
-        lv_draw_arc_dsc_t ar;
-        lv_draw_arc_dsc_init(&ar);
-        ar.center.x = cx;
-        ar.center.y = cy + s / 4;
-        ar.radius = s * 3 / 4;
-        ar.width = s * 3 / 4;
-        ar.color = c;
-        ar.start_angle = 0;
-        ar.end_angle = 360;
-        lv_draw_arc(layer, &ar);
-        break;
-    }
-    case G_CLOCK: {                        /* clock face + hands */
-        lv_draw_arc_dsc_t ar;
-        lv_draw_arc_dsc_init(&ar);
-        ar.center.x = cx;
-        ar.center.y = cy;
-        ar.radius = s;
-        ar.width = 2;
-        ar.color = c;
-        ar.start_angle = 0;
-        ar.end_angle = 360;
-        lv_draw_arc(layer, &ar);
-        ln.p1.x = cx; ln.p1.y = cy;
-        ln.p2.x = cx; ln.p2.y = cy - s + 4;
-        lv_draw_line(layer, &ln);
-        ln.p2.x = cx + s - 5; ln.p2.y = cy + 3;
-        lv_draw_line(layer, &ln);
-        break;
-    }
-    case G_ALERTS: {                       /* bell */
-        ln.width = 2;
-        ln.p1.x = cx - s + 2; ln.p1.y = cy + s / 2;
-        ln.p2.x = cx + s - 2; ln.p2.y = cy + s / 2;
-        lv_draw_line(layer, &ln);
-        ln.p1.x = cx - s + 2; ln.p1.y = cy + s / 2;
-        ln.p2.x = cx; ln.p2.y = cy - s;
-        lv_draw_line(layer, &ln);
-        ln.p1.x = cx + s - 2; ln.p1.y = cy + s / 2;
-        lv_draw_line(layer, &ln);
-        lv_area_t d = {cx - 2, cy + s / 2 + 3, cx + 2, cy + s / 2 + 7};
-        lv_draw_rect(layer, &rc, &d);
-        break;
-    }
-    case G_SETTINGS: {                     /* gear: spokes + hub */
-        ln.width = 3;
-        for (int i = 0; i < 4; i++) {
-            float a = i * 0.7853982f;
-            int dx = (int)(cosf(a) * (s - 1));
-            int dy = (int)(sinf(a) * (s - 1));
-            ln.p1.x = cx - dx; ln.p1.y = cy - dy;
-            ln.p2.x = cx + dx; ln.p2.y = cy + dy;
-            lv_draw_line(layer, &ln);
-        }
-        lv_draw_arc_dsc_t ar;
-        lv_draw_arc_dsc_init(&ar);
-        ar.center.x = cx;
-        ar.center.y = cy;
-        ar.radius = s / 2;
-        ar.width = 2;
-        ar.color = c;
-        ar.start_angle = 0;
-        ar.end_angle = 360;
-        lv_draw_arc(layer, &ar);
-        break;
-    }
-    case G_DIAG: {                         /* ECG pulse line */
-        ln.width = 2;
-        const int vx[6] = {-s, -s / 3, -s / 5, s / 6, s / 3, s};
-        const int vy[6] = {0, 0, -s, s - 2, -s / 3, -s / 3};
-        for (int i = 0; i < 5; i++) {
-            ln.p1.x = cx + vx[i]; ln.p1.y = cy + vy[i];
-            ln.p2.x = cx + vx[i + 1]; ln.p2.y = cy + vy[i + 1];
-            lv_draw_line(layer, &ln);
-        }
-        break;
-    }
-    case G_PHONE: {                        /* phone + vibration marks */
-        rc.bg_color = c;
-        lv_area_t ph = {cx - s / 2, cy - s, cx + s / 2, cy + s};
-        lv_draw_rect(layer, &rc, &ph);
-        lv_draw_rect_dsc_t bg;
-        lv_draw_rect_dsc_init(&bg);
-        bg.bg_opa = LV_OPA_COVER;
-        bg.bg_color = lv_color_black();
-        lv_area_t scr = {cx - s / 2 + 2, cy - s + 2, cx + s / 2 - 2,
-                         cy + s - 3};
-        lv_draw_rect(layer, &bg, &scr);
-        ln.width = 2;
-        ln.p1.x = cx - s / 2 - 4; ln.p1.y = cy - 4;
-        ln.p2.x = cx - s / 2 - 4; ln.p2.y = cy + 4;
-        lv_draw_line(layer, &ln);
-        ln.p1.x = cx + s / 2 + 4;
-        lv_draw_line(layer, &ln);
-        break;
-    }
-    case G_BATT: {                       /* body + tip + two-thirds fill */
-        lv_draw_rect_dsc_t bo;
-        lv_draw_rect_dsc_init(&bo);
-        bo.border_width = 2;
-        bo.border_color = c;
-        bo.border_opa = LV_OPA_COVER;
-        bo.bg_opa = LV_OPA_TRANSP;
-        lv_area_t bb = {cx - s, cy - s / 2, cx + s - 4, cy + s / 2};
-        lv_draw_rect(layer, &bo, &bb);
-        lv_area_t tp = {cx + s - 3, cy - s / 4, cx + s - 1, cy + s / 4};
-        lv_draw_rect(layer, &rc, &tp);
-        lv_area_t fl = {cx - s + 2, cy - s / 2 + 2,
-                        cx - s + 1 + (s * 2 - 8) * 2 / 3, cy + s / 2 - 2};
-        lv_draw_rect(layer, &rc, &fl);
-        break;
-    }
-    case G_SUN: {                        /* filled disc + rays */
-        lv_draw_arc_dsc_t ar;
-        lv_draw_arc_dsc_init(&ar);
-        ar.center.x = cx;
-        ar.center.y = cy;
-        ar.radius = s / 2;
-        ar.width = s / 2;
-        ar.color = c;
-        ar.start_angle = 0;
-        ar.end_angle = 360;
-        lv_draw_arc(layer, &ar);
-        for (int i = 0; i < 8; i++) {
-            float a = i * 0.7853982f;
-            ln.p1.x = cx + (int)(cosf(a) * (s * 3 / 4));
-            ln.p1.y = cy + (int)(sinf(a) * (s * 3 / 4));
-            ln.p2.x = cx + (int)(cosf(a) * s);
-            ln.p2.y = cy + (int)(sinf(a) * s);
-            lv_draw_line(layer, &ln);
-        }
-        break;
-    }
-    case G_BT: {                         /* rune: spine + two triangles */
-        ln.p1.x = cx; ln.p1.y = cy - s;
-        ln.p2.x = cx; ln.p2.y = cy + s;
-        lv_draw_line(layer, &ln);
-        int ax = cx + s * 2 / 3;
-        ln.p1.x = cx; ln.p1.y = cy - s;
-        ln.p2.x = ax; ln.p2.y = cy - s / 2;
-        lv_draw_line(layer, &ln);
-        ln.p1.x = ax; ln.p1.y = cy - s / 2;
-        ln.p2.x = cx; ln.p2.y = cy;
-        lv_draw_line(layer, &ln);
-        ln.p1.x = cx; ln.p1.y = cy;
-        ln.p2.x = ax; ln.p2.y = cy + s / 2;
-        lv_draw_line(layer, &ln);
-        ln.p1.x = ax; ln.p1.y = cy + s / 2;
-        ln.p2.x = cx; ln.p2.y = cy + s;
-        lv_draw_line(layer, &ln);
-        break;
-    }
-    case G_PLANE: {                      /* top-down plane: triangle + spine */
-        ln.p1.x = cx;     ln.p1.y = cy - s;
-        ln.p2.x = cx - s; ln.p2.y = cy + s * 2 / 3;
-        lv_draw_line(layer, &ln);
-        ln.p2.x = cx + s;
-        lv_draw_line(layer, &ln);
-        ln.p1.x = cx - s; ln.p1.y = cy + s * 2 / 3;
-        lv_draw_line(layer, &ln);
-        ln.p1.x = cx;     ln.p1.y = cy - s;
-        ln.p2.x = cx;     ln.p2.y = cy + s * 2 / 3;
-        lv_draw_line(layer, &ln);
-        break;
-    }
-    case G_TORCH: {                      /* flashlight silhouette + rays */
-        lv_area_t hd = {cx - s / 2, cy - s, cx + s / 2, cy - s / 3};
-        lv_area_t bd = {cx - s / 4, cy - s / 3, cx + s / 4, cy + s};
-        lv_draw_rect(layer, &rc, &hd);
-        lv_draw_rect(layer, &rc, &bd);
-        for (int i = -1; i <= 1; i++) {
-            ln.p1.x = ln.p2.x = cx + i * (s / 2);
-            ln.p1.y = cy - s - 2;
-            ln.p2.y = cy - s - 6;
-            lv_draw_line(layer, &ln);
-        }
-        break;
-    }
-    case G_STEPS: {                      /* footprint: sole + heel */
-        lv_draw_arc_dsc_t ar;
-        lv_draw_arc_dsc_init(&ar);
-        ar.color = c;
-        ar.start_angle = 0;
-        ar.end_angle = 360;
-        ar.center.x = cx - s / 4;
-        ar.center.y = cy - s / 3;
-        ar.radius = s / 2;
-        ar.width = s / 2;
-        lv_draw_arc(layer, &ar);
-        ar.center.x = cx + s / 5;
-        ar.center.y = cy + s / 2;
-        ar.radius = s * 2 / 5;
-        ar.width = s * 2 / 5;
-        lv_draw_arc(layer, &ar);
-        break;
-    }
-    case G_BOLT: {                       /* lightning zigzag */
-        const int bx[4] = {cx + s / 4, cx - s / 3, cx + s / 8, cx - s / 4};
-        const int by[4] = {cy - s, cy + s / 8, cy + s / 8, cy + s};
-        for (int i = 0; i < 3; i++) {
-            ln.p1.x = bx[i]; ln.p1.y = by[i];
-            ln.p2.x = bx[i + 1]; ln.p2.y = by[i + 1];
-            lv_draw_line(layer, &ln);
-        }
-        break;
-    }
-    }
+    mi_draw(layer, glyph_icon(g), cx, cy, (s * 12 + 2) / 5, c);
 }
 
 static void build_cc(lv_obj_t *r)
@@ -2360,7 +2130,7 @@ static const struct { const char *name; int glyph; lv_color_t col;
     {"STEPS",  G_STEPS,  LV_COLOR_MAKE(0x46,0xD8,0xE0), -1},
     {"HEART",  G_CARDIO, LV_COLOR_MAKE(0xF0,0x58,0x6E), SCR_CARDIO},
     {"REST",   G_DIAG,   LV_COLOR_MAKE(0xF0,0x8C,0x3C), SCR_CARDIO},
-    {"ENERGY", G_BOLT,   LV_COLOR_MAKE(0xF0,0xD0,0x40), -1},
+    {"ENERGY", G_FIRE,   LV_COLOR_MAKE(0xF0,0xD0,0x40), -1},
     {"SLEEP",  G_SLEEP,  LV_COLOR_MAKE(0xB0,0x6C,0xF0), SCR_SLEEP},
     {"WATER",  G_WATER,  LV_COLOR_MAKE(0x40,0xB0,0xF0), SCR_WATER},
 };
@@ -2545,6 +2315,8 @@ static void st_draw(lv_event_t *e)
                w_active ? C_WARN : lv_color_hex(0x5A6478), 120, 217, ws);
 }
 
+static void toast_show(const char *txt, uint32_t now);
+
 static void st_event(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
@@ -2580,6 +2352,19 @@ static void st_event(lv_event_t *e)
             if (st_def[st_focus].to >= 0) {
                 buzz(35);
                 nav_to((scr_t)st_def[st_focus].to);
+            } else {
+                /* STEPS / ENERGY have no deep screen: the hub tap used to
+                   do nothing; it now shows yesterday for comparison */
+                char t[24];
+                int y = DL.y_day ? (int)DL.y_steps : -1;
+                if (y < 0)
+                    lv_snprintf(t, sizeof t, "NO YESTERDAY");
+                else if (st_focus == 0)
+                    lv_snprintf(t, sizeof t, "YDAY %d STEPS", y);
+                else
+                    lv_snprintf(t, sizeof t, "YDAY %d KCAL", y * 4 / 100);
+                buzz(20);
+                toast_show(t, hal_millis());
             }
         } else if (h >= 0) {
             st_focus = h;
@@ -2990,7 +2775,7 @@ static void build_notif(lv_obj_t *r)
         return;
     }
     if (!n) {
-        mk_icon_at(r, 13, 0, 108, 80);   /* cloud */
+        mi_obj(r, MI_INBOX, 24, C_MUTED, 108, 80);
         mk_label_c(r, &kenney16, C_WHITE, 120, 118, "INBOX ZERO");
         mk_label_c(r, &kenney12, C_MUTED, 120, 140, "ALL CAUGHT UP");
         return;
@@ -3229,7 +3014,9 @@ static void toast_show(const char *txt, uint32_t now)
 {
     if (!toast_box) {
         toast_box = lv_obj_create(lv_layer_top());
-        lv_obj_set_size(toast_box, 128, 36);
+        /* sized to the text (min 128): long toasts used to spill out */
+        lv_obj_set_size(toast_box, LV_SIZE_CONTENT, 36);
+        lv_obj_set_style_min_width(toast_box, 128, 0);
         lv_obj_align(toast_box, LV_ALIGN_TOP_MID, 0, 16);
         lv_obj_set_style_bg_color(toast_box, lv_color_hex(0x141922), 0);
         lv_obj_set_style_bg_opa(toast_box, LV_OPA_COVER, 0);
@@ -3237,6 +3024,7 @@ static void toast_show(const char *txt, uint32_t now)
         lv_obj_set_style_border_width(toast_box, 2, 0);
         lv_obj_set_style_border_color(toast_box, C_ACCENT, 0);
         lv_obj_set_style_pad_all(toast_box, 0, 0);
+        lv_obj_set_style_pad_hor(toast_box, 16, 0);
         lv_obj_remove_flag(toast_box, LV_OBJ_FLAG_CLICKABLE |
                                       LV_OBJ_FLAG_SCROLLABLE);
         toast_lbl = lv_label_create(toast_box);
@@ -3248,6 +3036,8 @@ static void toast_show(const char *txt, uint32_t now)
     lv_obj_remove_flag(toast_box, LV_OBJ_FLAG_HIDDEN);
     toast_until = now + 1500;
 }
+
+#include "ui_charge.inc"
 
 static void toast_tick(uint32_t now)
 {
@@ -3277,7 +3067,10 @@ static void hr_toggle_by_button(uint32_t now)
     } else {
         buzz(60);
     }
-    toast_show(on ? "HR ON" : "HR OFF", now);
+    /* the flag still flips with no sensor found: sensors_tick re-probes
+       it and HR starts as soon as it answers */
+    toast_show(!on ? "HR OFF" : sensors_hrs_ok() ? "HR ON" : "HR: NO SENSOR",
+               now);
     if (cur == SCR_CARDIO || cur == SCR_SETTINGS)
         rebuild();
 }
@@ -3333,6 +3126,7 @@ void ui_init(void)
 }
 
 uint32_t button_held_ms(void);
+int button_missed_press(void);
 
 void ui_tick(void)
 {
@@ -3370,12 +3164,24 @@ void ui_tick(void)
     /* 2.2.3: decoded single / double press. Asleep or water-locked a
        single acts on release at once; otherwise it waits out the 300 ms
        double window so a double press never also navigates. */
-    int bev = btn_sm_step(&bsm, held != 0, now, asleep || water_lock);
+    int bev;
+    if (!held && button_missed_press()) {
+        /* 2.2.4: pressed and released between two polls (during a long
+           frame render or the 90 ms screen-off idle): feed the decoder
+           the press it missed, so a quick double press still counts */
+        bev = btn_sm_step(&bsm, 1, now, asleep || water_lock);
+        if (bev == BTN_EV_NONE)
+            bev = btn_sm_step(&bsm, 0, now, asleep || water_lock);
+    } else {
+        bev = btn_sm_step(&bsm, held != 0, now, asleep || water_lock);
+    }
     if (bev == BTN_EV_DOUBLE) {
         hr_toggle_by_button(now);
     } else if (bev == BTN_EV_SINGLE) {
         if (asleep)
             ui_wake();
+        else if (chg_visible())
+            chg_hide();                   /* closes the battery screen */
         else if (water_lock) {
             /* the button is the way out of water lock */
             wlock_set(0);
@@ -3398,6 +3204,7 @@ void ui_tick(void)
     sensors_tick(now);
     overlay_tick(now);
     toast_tick(now);
+    chg_tick(now);
     if (buzz2_at && (int32_t)(now - buzz2_at) >= 0) {
         buzz2_at = 0;
         buzz(35);
@@ -3508,9 +3315,11 @@ void ui_tick(void)
                 rebuild();
         }
     }
-    /* deferred flash write: 2 s after the last change, or on sleep */
+    /* deferred flash write: 2 s after the last change (in the background,
+       see persist_save_x), or on sleep */
+    persist_poll();
     if (persist_dirty && now - persist_dirty_ms > 2000)
-        persist_save();
+        persist_save_x(0);
     /* 2.2.3: nothing is drawn while the panel sleeps, so the per-screen
        updaters (second hand, heart beat, music clock, cardio trace) skip
        too; the first tick after a wake brings every label up to date

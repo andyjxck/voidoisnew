@@ -100,6 +100,7 @@ void spi_flash_init(void)
 
 void spi_flash_read(uint32_t addr, uint8_t *buf, unsigned len)
 {
+    flash_wait();                  /* a background erase must finish first */
     uint8_t hdr[4] = {0x03, addr >> 16, addr >> 8, addr};
     flash_sel(1);
     flash_xfer(hdr, 0, 4);
@@ -109,6 +110,7 @@ void spi_flash_read(uint32_t addr, uint8_t *buf, unsigned len)
 
 void spi_flash_write(uint32_t addr, const uint8_t *buf, unsigned len)
 {
+    flash_wait();                  /* WREN is ignored while an erase runs */
     while (len) {
         unsigned n = 256 - (addr & 0xFF);
         if (n > len)
@@ -126,12 +128,26 @@ void spi_flash_write(uint32_t addr, const uint8_t *buf, unsigned len)
     }
 }
 
-void spi_flash_sector_erase(uint32_t addr)
+/* 2.2.4: start a 4 KB erase and return at once (tens to hundreds of ms on
+   the XT25F32B); poll spi_flash_busy() before the next write. Every other
+   call here waits for it first, so nothing can land mid-erase. */
+void spi_flash_sector_erase_start(uint32_t addr)
 {
     uint8_t hdr[4] = {0x20, addr >> 16, addr >> 8, addr};
+    flash_wait();
     flash_cmd_only(0x06);
     flash_sel(1);
     flash_xfer(hdr, 0, 4);
     flash_sel(0);
+}
+
+int spi_flash_busy(void)
+{
+    return flash_status() & 1;
+}
+
+void spi_flash_sector_erase(uint32_t addr)
+{
+    spi_flash_sector_erase_start(addr);
     flash_wait();
 }

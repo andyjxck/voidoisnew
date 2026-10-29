@@ -7,6 +7,7 @@
 #ifndef VOIDOS_UI_DECO_H
 #define VOIDOS_UI_DECO_H
 #include "lvgl.h"
+#include "micons.h"
 
 #define DK_CYAN  lv_color_hex(0x46D8E0)
 #define DK_RED   lv_color_hex(0xF0586E)
@@ -142,51 +143,23 @@ static inline void dk_rule(lv_layer_t *l, int y, lv_color_t c)
 }
 
 
-/* ---- music glyphs ----------------------------------------------------- */
+/* ---- music glyphs: Google Material Symbols (micons.h) ------------------
+   s is the old half-size; a Material icon's art spans 20/24 of its box */
 enum { DK_M_PLAY, DK_M_PAUSE, DK_M_NEXT, DK_M_PREV, DK_M_VOLUP, DK_M_VOLDN,
        DK_M_NOTE };
 
 static inline void dk_music(lv_layer_t *l, int k, int cx, int cy, int s,
                             lv_color_t c)
 {
-    switch (k) {
-    case DK_M_PLAY:
-        dk_tri(l, cx - s * 2 / 3, cy - s, cx - s * 2 / 3, cy + s, cx + s, cy,
-               c, LV_OPA_COVER);
-        break;
-    case DK_M_PAUSE:
-        dk_rect(l, cx - s * 3 / 4, cy - s, cx - s / 4, cy + s, c, LV_OPA_COVER);
-        dk_rect(l, cx + s / 4, cy - s, cx + s * 3 / 4, cy + s, c, LV_OPA_COVER);
-        break;
-    case DK_M_NEXT:
-    case DK_M_PREV: {
-        int d = k == DK_M_NEXT ? 1 : -1;
-        dk_tri(l, cx - d * s, cy - s * 3 / 4, cx - d * s, cy + s * 3 / 4,
-               cx, cy, c, LV_OPA_COVER);
-        dk_tri(l, cx, cy - s * 3 / 4, cx, cy + s * 3 / 4, cx + d * s * 3 / 4,
-               cy, c, LV_OPA_COVER);
-        int bx = cx + d * s * 3 / 4;
-        dk_rect(l, d > 0 ? bx : bx - 2, cy - s * 3 / 4, d > 0 ? bx + 2 : bx,
-                cy + s * 3 / 4, c, LV_OPA_COVER);
-        break;
-    }
-    case DK_M_VOLUP:
-    case DK_M_VOLDN:
-        dk_rect(l, cx - s, cy - s / 3, cx - s / 2, cy + s / 3, c, LV_OPA_COVER);
-        dk_tri(l, cx - s / 2, cy - s / 3, cx - s / 2, cy + s / 3, cx, cy - s * 3 / 4,
-               c, LV_OPA_COVER);
-        dk_tri(l, cx - s / 2, cy + s / 3, cx, cy + s * 3 / 4, cx, cy - s * 3 / 4,
-               c, LV_OPA_COVER);
-        dk_line(l, cx + s / 3, cy, cx + s, cy, c, 2);
-        if (k == DK_M_VOLUP)
-            dk_line(l, cx + s * 2 / 3, cy - s / 3, cx + s * 2 / 3, cy + s / 3, c, 2);
-        break;
-    case DK_M_NOTE:
-        dk_arc(l, cx - s / 3, cy + s / 2, s / 3, s / 3 + 1, 0, 360, c);
-        dk_line(l, cx, cy + s / 2, cx, cy - s, c, 2);
-        dk_line(l, cx, cy - s, cx + s * 2 / 3, cy - s * 2 / 3, c, 2);
-        break;
-    }
+    static const unsigned char ico[] = {
+        [DK_M_PLAY] = MI_PLAY, [DK_M_PAUSE] = MI_PAUSE,
+        [DK_M_NEXT] = MI_SKIP_NEXT, [DK_M_PREV] = MI_SKIP_PREV,
+        [DK_M_VOLUP] = MI_VOLUME_UP, [DK_M_VOLDN] = MI_VOLUME_DOWN,
+        [DK_M_NOTE] = MI_MUSIC_NOTE,
+    };
+    if (k < 0 || k > DK_M_NOTE)
+        return;
+    mi_draw(l, ico[k], cx, cy, (s * 12 + 2) / 5, c);
 }
 
 #endif

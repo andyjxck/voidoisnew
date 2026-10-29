@@ -723,6 +723,7 @@ static void button_init(void)
     GPIO_OUTSET = BIT(PIN_BTN_OUT);
     /* input, pull-down, SENSE high (2.2.3: wakes the idle wait) */
     GPIO_PIN_CNF(PIN_BTN_IN) = (1u << 2) | (2u << 16);
+    GPIO_LATCH = BIT(PIN_BTN_IN);
 }
 
 /* ---- touch sampling ------------------------------------------------------ */
@@ -852,21 +853,50 @@ void hal_shutdown(void) {}
 
 void hal_present(void) {}
 
-/* button state: 0 released, else ms held; >=3000 triggers the revert reset */
+/* button state: 0 released, else ms held; >=3000 triggers the revert reset.
+   2.2.4: the pin's SENSE-high LATCH bit records a press even when it is
+   released before the next poll (a full-screen render can take longer
+   than a quick tap). Such a press is kept for button_missed_press(). */
+static uint8_t btn_missed;
+
+/* let contact bounce die out before re-arming the latch, or a bouncing
+   release would read as one more (phantom) press */
+static void btn_latch_rearm(void)
+{
+    uint32_t t0 = millis_raw();
+    while (millis_raw() - t0 < 8)
+        ;
+    GPIO_LATCH = BIT(PIN_BTN_IN);
+}
+
 uint32_t button_held_ms(void)
 {
-    static uint32_t last_now;
     uint32_t now = millis_raw();
     int btn = (GPIO_IN & BIT(PIN_BTN_IN)) != 0;
-    if (btn && !btn_was_down) {
-        btn_was_down = 1;
-        btn_down_ms = now;
-    } else if (!btn) {
-        btn_was_down = 0;
+    if (btn) {
+        if (!btn_was_down) {
+            btn_was_down = 1;
+            btn_down_ms = now;
+        }
+        /* +1: the first poll of a press already counts as held (was 0,
+           so a press seen by one poll only was dropped) */
+        return now - btn_down_ms + 1;
     }
-    last_now = now;
-    (void)last_now;
-    return btn ? now - btn_down_ms : 0;
+    if (btn_was_down) {
+        btn_was_down = 0;
+        btn_latch_rearm();
+    } else if (GPIO_LATCH & BIT(PIN_BTN_IN)) {
+        btn_missed = 1;               /* down and up between two polls */
+        btn_latch_rearm();
+    }
+    return 0;
+}
+
+int button_missed_press(void)
+{
+    int m = btn_missed;
+    btn_missed = 0;
+    return m;
 }
 
 /* MCUBoot image_ok flag: the DFU'd image is test-booted once and reverts

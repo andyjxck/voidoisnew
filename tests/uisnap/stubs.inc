@@ -43,11 +43,15 @@ int hal_clock_restored(void) { return snap_restored; }
 void hal_clock_restore(int y, int mo, int d, int dow, int h, int mi, int s)
 { (void)y; (void)mo; (void)d; (void)dow; (void)h; (void)mi; (void)s; }
 uint32_t hal_clock_tod_ms(void) { return 630u * 60000u; }
-int hal_battery_pct(void) { return 81; }
+int snap_batt_pct = 81, snap_on_charger = 0, snap_charging = 0;
+int hal_battery_pct(void) { return snap_batt_pct; }
+int hal_on_charger(void) { return snap_on_charger; }
+int hal_charging(void) { return snap_charging; }
 int hal_battery_raw(void) { return 3300; }
 int hal_boot_confirmed(void) { return 1; }
 void hal_motor(int on) { (void)on; }
 uint32_t button_held_ms(void) { return 0; }
+int button_missed_press(void) { return 0; }
 static int snap_ble = 1;
 int ble_connected(void) { return snap_ble; }
 void ble_set_enabled(int on) { (void)on; }
@@ -78,6 +82,11 @@ void spi_flash_sector_erase(uint32_t a)
     uint8_t *p = fake_at(a & ~0xFFFu);
     if (p) memset(p, 0xFF, 4096);
 }
+/* the fake erase is instant, but report busy once so the background-save
+   path (persist_poll) is exercised */
+int snap_flash_busy;
+void spi_flash_sector_erase_start(uint32_t a) { spi_flash_sector_erase(a); snap_flash_busy = 1; }
+int spi_flash_busy(void) { if (snap_flash_busy) { snap_flash_busy = 0; return 1; } return 0; }
 int ancs_cts_state(void) { return 0; }
 int ancs_sub_fail(void) { return 0; }
 void ble_bond_diag(int *a, int *b) { *a = 1; *b = 0; }

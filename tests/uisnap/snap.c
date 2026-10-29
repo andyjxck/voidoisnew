@@ -889,7 +889,58 @@ int main(int argc, char **argv)
                 "2.2.2 settings record still loads (%02d:%02d)", alarm_h, alarm_m);
         persist_save();
         finding(persist_slot == 1 ? 0 : 1, "first 2.2.3 save leaves the 2.2.2 record alone");
+        /* 2.2.4 background save: erase starts, the record lands on a later
+           tick, and a load afterwards sees it */
+        {
+            int before = persist_slot;
+            alarm_h = 6; alarm_m = 41; persist_save_x(0);
+            int mid = persist_pending;
+            persist_poll();              /* fake chip reports busy once */
+            int still = persist_pending;
+            persist_poll();
+            alarm_h = 0; alarm_m = 0; persist_load();
+            finding(mid && still && !persist_pending && persist_slot != before &&
+                    alarm_h == 6 && alarm_m == 41 ? 0 : 1,
+                    "background save writes after the erase (%02d:%02d)",
+                    alarm_h, alarm_m);
+            /* a sync save while one is in flight completes both in order */
+            alarm_h = 8; alarm_m = 2; persist_save_x(0);
+            alarm_h = 8; alarm_m = 3; persist_save();
+            alarm_h = 0; alarm_m = 0; persist_load();
+            finding(!persist_pending && alarm_h == 8 && alarm_m == 3 ? 0 : 1,
+                    "sync save over a pending one keeps the newest (%02d:%02d)",
+                    alarm_h, alarm_m);
+        }
         alarm_h = keep_h; alarm_m = keep_m;
+    }
+    /* 2.2.4 battery / charging screen */
+    {
+        extern int snap_batt_pct, snap_on_charger, snap_charging;
+        cur_name = "charge";
+        cur = SCR_FACE; rebuild(); settle();
+        snap_batt_pct = 62; snap_on_charger = 1; snap_charging = 1;
+        chg_show(hal_millis(), 6000);
+        chg_step = 2;
+        lv_obj_invalidate(chg_box);
+        settle(); save(dir, "40_charging");
+        finding(chg_visible() ? 0 : 1, "charging screen shows when plugged in");
+        snap_batt_pct = 100; snap_charging = 0;
+        lv_obj_invalidate(chg_box);
+        settle(); save(dir, "41_charged");
+        /* single press closes it */
+        chg_hide();
+        finding(!chg_visible() ? 0 : 1, "charging screen closes");
+        snap_on_charger = 0; snap_batt_pct = 81;
+        /* BATT hub in the control centre opens it on battery */
+        cur = SCR_CC; rebuild(); settle();
+        ccw_activate(CCW_BATT);
+        lv_obj_invalidate(chg_box);
+        settle(); save(dir, "42_battery_tap");
+        finding(chg_visible() ? 0 : 1, "BATT hub tap opens the battery screen");
+        chg_hide();
+        snap_on_charger = 1; snap_charging = 1; snap_batt_pct = 40;
+        shot(dir, SCR_CC, "43_cc_charging_icon");
+        snap_on_charger = 0; snap_charging = 0; snap_batt_pct = 81;
     }
     cur_name = "";
     printf("wrote screens to %s; tap/text audit: %d checks, %d failed\n",
