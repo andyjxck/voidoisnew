@@ -14,11 +14,14 @@ PYTHON  = $(TOOLS)/python3
 ARCH    = -mcpu=cortex-m4 -mthumb -mabi=aapcs -mfloat-abi=hard -mfpu=fpv4-sp-d16
 CFLAGS  = $(ARCH) -std=c11 -Os -g -ffunction-sections -fdata-sections \
           -Wall -Wextra -Werror -I../include -I../core -I. \
-          -DVOIDOS_DEVICE -DVOIDOS_DEBUG_TOUCH -DVOIDOS_VERSION=\"$(VERSION)\"
+          -DVOIDOS_DEVICE -DVOIDOS_DEBUG_TOUCH $(DEPFLAGS)
+# Every object records the headers it includes (.d files, read at the end),
+# so editing a header or an .inc rebuilds what uses it.
+DEPFLAGS = -MMD -MP
 LDFLAGS = $(ARCH) -T link.ld -Wl,--gc-sections -Wl,-Map=voidos-app.map \
           -specs=nano.specs -Wl,--no-warn-rwx-segments
 
-VERSION ?= 2.2.0
+VERSION ?= 2.2.1
 BIN      = voidos-app.bin
 IMG      = voidos-app-image.bin
 ZIP      = voidos-dfu-$(VERSION).zip
@@ -26,7 +29,7 @@ ZIP      = voidos-dfu-$(VERSION).zip
 LVGL_SRC := $(shell find vendor/lvgl/src -name '*.c')
 LVGL_OBJS := $(LVGL_SRC:.c=.o)
 LVGL_CFLAGS = $(ARCH) -std=gnu11 -Os -g -ffunction-sections -fdata-sections \
-              -w -DLV_CONF_INCLUDE_SIMPLE -DLV_USE_OS=LV_OS_NONE -Ivendor -I.
+              -w -DLV_CONF_INCLUDE_SIMPLE -DLV_USE_OS=LV_OS_NONE -Ivendor -I. $(DEPFLAGS)
 
 OBJS = startup.o main.o syscalls.o hal_sys.o hal_display.o lvgl_port.o \
        ui_face.o ui_nav.o sensors.o spi_flash.o \
@@ -63,7 +66,7 @@ NIMBLE_INC  = -Inimble_port/include \
        -Ivendor/nrfx/templates -Ivendor/cmsis/CMSIS/Core/Include -I.
 NIMBLE_CFLAGS = $(ARCH) -std=gnu11 -Os -g -ffunction-sections -fdata-sections \
        -w -DNRF52832_XXAA -DNIMBLE_CFG_CONTROLLER \
-       -include syscfg/syscfg.h -include os/util.h $(NIMBLE_INC)
+       -include syscfg/syscfg.h -include os/util.h $(NIMBLE_INC) $(DEPFLAGS)
 
 $(NIMBLE_OBJS): %.o: %.c nimble_port/include/syscfg/syscfg.h
 	$(CC) $(NIMBLE_CFLAGS) -c $< -o $@
@@ -97,7 +100,28 @@ vendor/lvgl/src/%.o: vendor/lvgl/src/%.c lv_conf.h
 %.o: %.c board.h
 	$(CC) $(CFLAGS) -Ivendor -Ivendor/lvgl -DLV_CONF_INCLUDE_SIMPLE -c $< -o $@
 
-voidos-app.out: $(OBJS) link.ld
+# gen/version.h carries VERSION. It is rewritten only when VERSION
+# changes, and the .d files make everything that includes it rebuild, so
+# a version bump can never leave a stale "VOIDOS x.y.z" string behind.
+# gen/flags.stamp does the same for the compiler flags themselves.
+FLAGS_SIG = $(CC) $(CFLAGS) $(LVGL_CFLAGS) $(NIMBLE_CFLAGS)
+gen/version.h: FORCE
+	@mkdir -p gen
+	@printf '#define VOIDOS_VERSION "%s"\n' '$(VERSION)' > $@.tmp
+	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; echo "version.h -> $(VERSION)"; fi
+gen/flags.stamp: FORCE
+	@mkdir -p gen
+	@echo '$(FLAGS_SIG)' | md5sum > $@.tmp
+	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; echo "compiler flags changed: full rebuild"; fi
+$(OBJS): gen/flags.stamp | gen/version.h
+
+# hand-written peripheral register offsets must match the Nordic MDK
+gen/regcheck.ok: hal_regcheck.c hal_saadc.h
+	@mkdir -p gen
+	$(CC) $(ARCH) -std=c11 -fsyntax-only -Wall -Werror -DNRF52832_XXAA \
+	    -Ivendor/nrfx/mdk -Ivendor/cmsis/CMSIS/Core/Include -I. $< && touch $@
+
+voidos-app.out: $(OBJS) link.ld gen/regcheck.ok
 	$(CC) $(OBJS) $(LDFLAGS) -lm -o $@
 
 # The .bin is flashed right after the 32-byte MCUBoot header, so its
@@ -129,6 +153,10 @@ size: voidos-app.out
 	$(SIZE) $<
 
 clean:
-	rm -f *.o gen/*.o *.out *.map $(BIN) $(IMG) voidos-dfu-*.zip
+	rm -f $(OBJS) $(OBJS:.o=.d) *.o *.d gen/*.o gen/*.d gen/version.h gen/flags.stamp \
+	      *.out *.map $(BIN) $(IMG) voidos-dfu-*.zip
 
-.PHONY: all clean size
+FORCE:
+.PHONY: all clean size FORCE
+
+-include $(OBJS:.o=.d)

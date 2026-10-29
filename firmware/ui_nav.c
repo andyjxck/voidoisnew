@@ -9,8 +9,11 @@
 #include "ui_deco.h"
 #include "phone.h"
 
+#if defined(VOIDOS_DEVICE) && __has_include("gen/version.h")
+#include "gen/version.h"         /* generated from the Makefile's VERSION */
+#endif
 #ifndef VOIDOS_VERSION
-#define VOIDOS_VERSION "dev"     /* the firmware Makefile passes VERSION */
+#define VOIDOS_VERSION "dev"
 #endif
 
 void display_backlight(int level);

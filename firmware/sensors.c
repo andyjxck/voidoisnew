@@ -31,7 +31,29 @@ static int32_t act_delta;       /* last |mag - base|, for raise-to-wake
 static int armed = 1;
 static uint32_t last_step_ms;
 
-#include "bma_cfg.h"
+#include "bma_cfg.h"      /* BMA425 stream (chip id 0x13) */
+#include "bma423_cfg.h"   /* BMA423 stream: what InfiniTime loads into a
+                             BMA421 (chip id 0x11) */
+static uint8_t bma_blob;       /* diag: 0 none, 3 = BMA423 stream, 5 = BMA425 */
+
+/* Feature block access the way Bosch's bma4.c does it: in 16-byte
+   chunks, each preceded by the ASIC word index (start + offset / 2) in
+   0x5B (low 4 bits) / 0x5C (the rest). */
+static uint16_t bma_feat_base;
+static int bma_feat_xfer(uint8_t *buf, unsigned len, int write)
+{
+    for (unsigned off = 0; off < len; off += 16) {
+        unsigned idx = bma_feat_base + off / 2;
+        unsigned n = len - off < 16 ? len - off : 16;
+        if (!i2c_write_reg(BMA_ADDR, 0x5B, idx & 0x0F) ||
+            !i2c_write_reg(BMA_ADDR, 0x5C, (idx >> 4) & 0xFF))
+            return 0;
+        if (write ? !i2c_write_regs(BMA_ADDR, 0x5E, buf + off, n)
+                  : !i2c_read_reg(BMA_ADDR, 0x5E, buf + off, n))
+            return 0;
+    }
+    return 1;
+}
 
 int i2c_write_regs(uint8_t addr, uint8_t reg, const uint8_t *src, unsigned n);
 
@@ -48,14 +70,25 @@ static void bma_init(void)
 
     /* Bosch feature engine: stream the config into internal RAM,
        then start the ASIC so features come alive. Register-level
-       sequence mirrors the published sensor driver. */
+       sequence mirrors Bosch's bma4_write_config_file. The stream must
+       match the chip: 2.2.0 always sent the BMA425 stream, and the
+       BMA421 (id 0x11) rejected it with INTERNAL_STATUS 3. InfiniTime
+       sends the BMA423 stream to id 0x11 and the BMA425 one to 0x13. */
+    const uint8_t *cfg = bma423_cfg;
+    unsigned cfg_size = BMA423_CFG_SIZE;
+    bma_blob = 3;
+    if (id == 0x13) {
+        cfg = bma_cfg;
+        cfg_size = BMA_CFG_SIZE;
+        bma_blob = 5;
+    }
     i2c_write_reg(BMA_ADDR, 0x59, 0x00);      /* INIT_CTRL: halt loader */
     int stream_ok = 1;
-    for (unsigned i = 0; i < BMA_CFG_SIZE && stream_ok; i += 16) {
+    for (unsigned i = 0; i < cfg_size && stream_ok; i += 16) {
         stream_ok &= i2c_write_reg(BMA_ADDR, 0x5B, (i / 2) & 0x0F);
         stream_ok &= i2c_write_reg(BMA_ADDR, 0x5C, (i / 2) >> 4);
-        unsigned n = BMA_CFG_SIZE - i < 16 ? BMA_CFG_SIZE - i : 16;
-        stream_ok &= i2c_write_regs(BMA_ADDR, 0x5E, bma_cfg + i, n);
+        unsigned n = cfg_size - i < 16 ? cfg_size - i : 16;
+        stream_ok &= i2c_write_regs(BMA_ADDR, 0x5E, cfg + i, n);
     }
     if (!stream_ok)
         bma_feat |= 8;                        /* diag: a chunk was dropped */
@@ -72,17 +105,17 @@ static void bma_init(void)
         /* enable on-chip features: byte 0x3B bit4 = step counter,
            byte 0x40 bit0 = wrist-wear (raise gesture) */
         uint8_t feat[70];
-        /* the feature block lives at RAM index 0: re-point the index
-           registers, which the stream loop left at the last chunk */
-        i2c_write_reg(BMA_ADDR, 0x5B, 0x00);
-        i2c_write_reg(BMA_ADDR, 0x5C, 0x00);
-        if (i2c_read_reg(BMA_ADDR, 0x5E, feat, 70)) {
+        /* Bosch reads the feature block's start index back from 0x5B/
+           0x5C once the ASIC is up (get_feature_config_start_addr) */
+        uint8_t lo = 0, hi = 0;
+        i2c_read_reg(BMA_ADDR, 0x5B, &lo, 1);
+        i2c_read_reg(BMA_ADDR, 0x5C, &hi, 1);
+        bma_feat_base = (uint16_t)((lo & 0x0F) | (hi << 4));
+        if (bma_feat_xfer(feat, sizeof feat, 0)) {
             bma_feat |= 1;
             feat[0x3B] |= 0x10;
             feat[0x40] |= 0x01;
-            i2c_write_reg(BMA_ADDR, 0x5B, 0x00);
-            i2c_write_reg(BMA_ADDR, 0x5C, 0x00);
-            if (i2c_write_regs(BMA_ADDR, 0x5E, feat, 70)) {
+            if (bma_feat_xfer(feat, sizeof feat, 1)) {
                 bma_feat |= 2;
                 bma_engine = 1;
                 /* latch feature flags until read, and route wrist-wear
@@ -827,7 +860,7 @@ int sensors_raise_wake(void)
     return raise_check(why, whz, whx) || raise_check(whx, whz, why);
 }
 int sensors_bma_engine(void) { return bma_engine; }
-int sensors_bma_dbg(void) { return (bma_id << 16) | (bma_stat << 8) | bma_feat; }
+int sensors_bma_dbg(void) { return ((int)bma_blob << 24) | (bma_id << 16) | (bma_stat << 8) | bma_feat; }
 int sensors_hrs_fs10(void) { return (int)(hr_fs * 10.0f); }
 int sensors_retries(void) { return (int)(hrs_retries * 100 + bma_retries); }
 int sensors_hrs_pk(void) { return last_pk_bpm; }

@@ -54,6 +54,10 @@ static uint16_t a_conn;
 static uint16_t svc_start, svc_end;
 static uint16_t h_ns_val, h_ns_cccd, h_ds_val, h_ds_cccd, h_cp_val;
 static uint32_t disc_retry_at;
+static uint32_t ancs_start_at;      /* begin discovery once CTS/AMS allow */
+static uint8_t ancs_tries;          /* discovery attempts this link */
+static uint8_t link_enc;            /* this link is encrypted */
+static int16_t ancs_last_err;       /* diag: last GATT error, any step */
 static int cts_state;               /* 0 idle 1 disc 2 read 3 synced */
 static uint32_t cts_pending_at;
 static int sub_inflight;            /* a CCCD write awaits its callback */
@@ -307,29 +311,42 @@ static int sub_done(uint16_t conn, const struct ble_gatt_error *err,
 }
 int ancs_sub_fail(void) { return sub_fail; }
 
+static void disc_failed(int status);
+
+/* NimBLE's "discover all descriptors" over a service range reports every
+   attribute after the start handle, and its chr_val_handle argument is
+   just the start handle we passed (the service declaration) for every
+   one of them. 2.2.0 compared that against the NS/DS value handles,
+   which can never match, so neither CCCD was ever found and ANCS fell
+   back to idle without subscribing. A CCCD belongs to the closest
+   characteristic value handle below it. */
 static int dsc_cb(uint16_t conn, const struct ble_gatt_error *error,
-                  uint16_t chr_val_handle,
-                  const struct ble_gatt_dsc *dsc, void *arg)
+                  uint16_t chr, const struct ble_gatt_dsc *dsc, void *arg)
 {
-    (void)conn; (void)arg;
+    (void)conn; (void)arg; (void)chr;
     if (error->status == BLE_HS_EDONE) {
-        /* subscribe Notification Source first; Data Source after */
-        if (h_ns_cccd)
-            subscribe_ns();
-        else
-            state = ST_IDLE;
+        if (h_ns_cccd) {
+            state = ST_SUB_NS;
+            if (h_ds_cccd)
+                subscribe_ds();             /* DS first, then NS */
+            else
+                subscribe_ns();
+        } else {
+            disc_failed(-2);                /* no NS CCCD in the service */
+        }
         return 0;
     }
-    if (error->status != 0 || !dsc)
+    if (error->status != 0) {
+        disc_failed(error->status);
         return 0;
-    /* 0x2902 = client characteristic configuration */
-    if (dsc->uuid.u.type == BLE_UUID_TYPE_16 &&
-        dsc->uuid.u16.value == 0x2902) {
-        if (chr_val_handle == h_ns_val)
-            h_ns_cccd = dsc->handle;
-        else if (chr_val_handle == h_ds_val)
-            h_ds_cccd = dsc->handle;
     }
+    if (!dsc || ble_uuid_u16(&dsc->uuid.u) != 0x2902)
+        return 0;
+    uint16_t owner = gatt_owner_of(dsc->handle, h_ns_val, h_ds_val, h_cp_val);
+    if (owner && owner == h_ns_val)
+        h_ns_cccd = dsc->handle;
+    else if (owner && owner == h_ds_val)
+        h_ds_cccd = dsc->handle;
     return 0;
 }
 
@@ -340,14 +357,19 @@ static int chr_cb(uint16_t conn, const struct ble_gatt_error *error,
     if (error->status == BLE_HS_EDONE) {
         if (h_ns_val && h_cp_val) {
             state = ST_DSC;
-            ble_gattc_disc_all_dscs(a_conn, svc_start, svc_end,
-                                    dsc_cb, NULL);
+            int rc = ble_gattc_disc_all_dscs(a_conn, svc_start, svc_end,
+                                             dsc_cb, NULL);
+            if (rc) disc_failed(rc);
         } else {
-            state = ST_IDLE;
+            disc_failed(-3);                /* NS or CP missing */
         }
         return 0;
     }
-    if (error->status != 0 || !chr)
+    if (error->status != 0) {
+        disc_failed(error->status);
+        return 0;
+    }
+    if (!chr)
         return 0;
     if (!ble_uuid_cmp(&chr->uuid.u, &uuid_ns.u))
         h_ns_val = chr->val_handle;

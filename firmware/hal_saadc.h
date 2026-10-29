@@ -1,0 +1,44 @@
+/* nRF52832 SAADC registers used by the battery reading.
+ * Offsets are from the nRF52832 product specification; hal_regcheck.c
+ * checks every one of them against the Nordic MDK's NRF_SAADC_Type at
+ * compile time, so a wrong offset (2.2.0 waited on 0x108 = DONE as if it
+ * were END) fails the build instead of reading 0 on the watch. */
+#ifndef HAL_SAADC_H
+#define HAL_SAADC_H
+#include <stdint.h>
+
+#define SAADC_BASE                0x40007000u
+#define SAADC_OFF_TASKS_START     0x000u
+#define SAADC_OFF_TASKS_SAMPLE    0x004u
+#define SAADC_OFF_TASKS_STOP      0x008u
+#define SAADC_OFF_EVENTS_STARTED  0x100u
+#define SAADC_OFF_EVENTS_END      0x104u
+#define SAADC_OFF_EVENTS_STOPPED  0x114u
+#define SAADC_OFF_ENABLE          0x500u
+#define SAADC_OFF_CH0_PSELP       0x510u
+#define SAADC_OFF_CH0_PSELN       0x514u
+#define SAADC_OFF_CH0_CONFIG      0x518u
+#define SAADC_OFF_RESOLUTION      0x5F0u
+#define SAADC_OFF_OVERSAMPLE      0x5F4u
+#define SAADC_OFF_SAMPLERATE      0x5F8u
+#define SAADC_OFF_RESULT_PTR      0x62Cu
+#define SAADC_OFF_RESULT_MAXCNT   0x630u
+
+#define SAADC_R(off) (*(volatile uint32_t *)(SAADC_BASE + (off)))
+#define SAADC_START          SAADC_R(SAADC_OFF_TASKS_START)
+#define SAADC_SAMPLE         SAADC_R(SAADC_OFF_TASKS_SAMPLE)
+#define SAADC_STOP           SAADC_R(SAADC_OFF_TASKS_STOP)
+#define SAADC_EVENTS_STARTED SAADC_R(SAADC_OFF_EVENTS_STARTED)
+#define SAADC_EVENTS_END     SAADC_R(SAADC_OFF_EVENTS_END)
+#define SAADC_EVENTS_STOPPED SAADC_R(SAADC_OFF_EVENTS_STOPPED)
+#define SAADC_ENABLE         SAADC_R(SAADC_OFF_ENABLE)
+#define SAADC_CH0_PSELP      SAADC_R(SAADC_OFF_CH0_PSELP)
+#define SAADC_CH0_PSELN      SAADC_R(SAADC_OFF_CH0_PSELN)
+#define SAADC_CH0_CONF       SAADC_R(SAADC_OFF_CH0_CONFIG)
+#define SAADC_RESOL          SAADC_R(SAADC_OFF_RESOLUTION)
+#define SAADC_OVERSAMPLE     SAADC_R(SAADC_OFF_OVERSAMPLE)
+#define SAADC_SAMPLERATE     SAADC_R(SAADC_OFF_SAMPLERATE)
+#define SAADC_RES_PTR        SAADC_R(SAADC_OFF_RESULT_PTR)
+#define SAADC_RES_MAX        SAADC_R(SAADC_OFF_RESULT_MAXCNT)
+
+#endif

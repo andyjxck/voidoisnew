@@ -230,23 +230,11 @@ void hal_motor(int on)
 }
 
 /* battery voltage on P0.31 (AIN7) through the 2:1 divider */
-#define SAADC_BASE      0x40007000u
-#define SAADC_START     REG32(SAADC_BASE + 0x000)
-#define SAADC_SAMPLE    REG32(SAADC_BASE + 0x004)
-#define SAADC_STOP      REG32(SAADC_BASE + 0x008)
-#define SAADC_EVENTS_STARTED REG32(SAADC_BASE + 0x100)
-#define SAADC_EVENTS_END REG32(SAADC_BASE + 0x108)
-#define SAADC_EVENTS_STOPPED REG32(SAADC_BASE + 0x110)
+#include "hal_saadc.h"   /* register offsets, checked against the nRF MDK */
 static int battery_raw;
+static int battery_fail;
 int hal_battery_raw(void) { return battery_raw; }
-#define SAADC_BUSY      REG32(SAADC_BASE + 0x400)
-#define SAADC_ENABLE    REG32(SAADC_BASE + 0x500)
-#define SAADC_CH0_PSELP REG32(SAADC_BASE + 0x510)
-#define SAADC_CH0_PSELN REG32(SAADC_BASE + 0x514)
-#define SAADC_CH0_CONF  REG32(SAADC_BASE + 0x518)
-#define SAADC_RESOL     REG32(SAADC_BASE + 0x5F0)
-#define SAADC_RES_PTR   REG32(SAADC_BASE + 0x62C)
-#define SAADC_RES_MAX   REG32(SAADC_BASE + 0x630)
+int hal_battery_fail(void) { return battery_fail; }
 
 int hal_battery_pct(void)
 {
@@ -254,25 +242,30 @@ int hal_battery_pct(void)
     static const uint16_t curve[][2] = {
         {3500, 0}, {3616, 3}, {3723, 22}, {3776, 48}, {3979, 79}, {4180, 100}
     };
-    static int16_t result[4];
+    /* volatile: EasyDMA writes this behind the compiler's back. In 2.2.0
+       it was a plain array, so GCC folded "result[0] = 0 ... raw =
+       result[0]" into the constant 0 and the reading was always 0. */
+    static volatile int16_t result[2];
     SAADC_ENABLE = 1;
     SAADC_CH0_PSELP = 8;            /* PSEL is AIN#+1: 8 = AIN7 = P0.31 */
     SAADC_CH0_PSELN = 0;
     /* InfiniTime's channel config: gain 1/4, internal 0.6 V ref (2.4 V
-       full scale), 40 us acquisition. The battery sits behind a high-
-       value 2:1 divider; 1.6.2's 15 us acquisition is too short for
-       that source impedance and reads low. */
+       full scale), 40 us acquisition (the 2:1 divider is high impedance) */
     SAADC_CH0_CONF = (2u << 8) | (5u << 16);
     SAADC_RESOL = 2;                /* 12 bit */
+    SAADC_OVERSAMPLE = 0;
+    SAADC_SAMPLERATE = 0;           /* one sample per SAMPLE task */
     SAADC_RES_PTR = (uint32_t)result;
     SAADC_RES_MAX = 1;
     SAADC_EVENTS_STARTED = 0;
     SAADC_EVENTS_END = 0;
     SAADC_EVENTS_STOPPED = 0;
-    result[0] = 0;
+    result[0] = -32768;             /* sentinel: never written by the ADC */
     SAADC_START = 1;
-    /* datasheet order: START -> STARTED -> SAMPLE -> END -> STOP. A
-       SAMPLE fired before STARTED is dropped and the result stays 0 */
+    /* datasheet order: START -> STARTED -> SAMPLE -> END (the result is
+       in RAM) -> STOP -> STOPPED. 2.2.0 waited on DONE (0x108, the
+       conversion only) and then on CALIBRATEDONE (0x110), which never
+       fires, so it stopped the SAADC before the result reached RAM. */
     for (unsigned spin = 0; !SAADC_EVENTS_STARTED && spin < 200000; spin++)
         ;
     SAADC_SAMPLE = 1;
@@ -282,7 +275,12 @@ int hal_battery_pct(void)
     for (unsigned spin = 0; !SAADC_EVENTS_STOPPED && spin < 200000; spin++)
         ;
     SAADC_ENABLE = 0;
+    __asm volatile ("" ::: "memory");
     int raw = result[0];
+    if (raw == -32768) {            /* no conversion landed: keep the last */
+        battery_fail++;
+        raw = battery_raw > 0 ? battery_raw : 0;
+    }
     battery_raw = raw;
     if (raw < 0) raw = 0;
     /* raw/4096 * 2.4 V input range * 2 (the 2:1 battery divider) */
