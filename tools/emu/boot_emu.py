@@ -113,6 +113,18 @@ while True:
         uc.emu_start(pc_now | 1, 0xFFFFFFFF, count=2_000_000)
     except UcError as e:
         p = uc.reg_read(UC_ARM_REG_PC)
+        # 2.2.3: hal_delay_ms sleeps in WFE; unicorn has no WFE, so treat
+        # it as a NOP (the RTC model advances on every read, so the
+        # delay loop still ends) and count the sleeps
+        hints = (b'\x20\xbf', b'\x30\xbf')
+        if bytes(uc.mem_read(p, 2)) in hints:
+            state['wfe'] = state.get('wfe', 0) + 1
+            pc_now = p + 2
+            continue
+        if bytes(uc.mem_read(p - 2, 2)) in hints:   # PC already past it
+            state['wfe'] = state.get('wfe', 0) + 1
+            pc_now = p
+            continue
         print('  EMU ERROR', e, 'at', sym(p), 'lr', sym(uc.reg_read(UC_ARM_REG_LR)))
         break
     if state['reset']:
@@ -123,4 +135,5 @@ while True:
         break
 ms = state['ticks'] * 1000 // 32768
 print(f"end t={ms} ms pc={sym(uc.reg_read(UC_ARM_REG_PC))} reset={state['reset']} max WDT gap={state['wdt_max']*1000//32768} ms")
+print('WFE sleeps:', state.get('wfe', 0), 'in', ms, 'ms')
 print('stack low-water: sp now', hex(uc.reg_read(UC_ARM_REG_SP)))

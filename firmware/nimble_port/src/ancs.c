@@ -237,7 +237,10 @@ static void disc_failed(int status)
     /* iOS refuses the CCCD writes until notification access is allowed
        on the phone: keep retrying, quickly at first */
     ancs_tries++;
-    ancs_start_at = hal_millis() + (ancs_tries < 8 ? 12000 : 60000);
+    /* 2.2.3: after ~20 min of refusals, every 5 min (each retry is a full
+       GATT discovery; once a minute forever cost radio time all day) */
+    ancs_start_at = hal_millis() + (ancs_tries < 8 ? 12000 :
+                                    ancs_tries < 28 ? 60000 : 300000);
 }
 
 static int ns_sub_done(uint16_t conn, const struct ble_gatt_error *err,

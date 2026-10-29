@@ -104,11 +104,69 @@ uint32_t hal_millis(void)
     return frame_latched ? frame_ms : millis_raw();
 }
 
+/* 2.2.3 battery: hal_delay_ms used to spin on the RTC counter, so the
+   CPU never slept — the main loop's 20 + 5 ms waits kept it running
+   at 64 MHz around the clock (several mA, the watch's biggest drain).
+   Now it sleeps in WFE until an RTC1 COMPARE0 event. The RTC1 interrupt
+   is enabled in the peripheral but NOT in the NVIC; SEVONPEND turns its
+   pending bit into a wake-up event, so no handler is needed and nothing
+   else changes. Radio/timer interrupts still wake it (and run their
+   ISRs) as before; the loop just re-arms until the time is up. */
+#define RTC1_EVENTS_COMPARE0 REG32(0x40011140)
+#define RTC1_INTENSET        REG32(0x40011304)
+#define RTC1_CC0             REG32(0x40011540)
+#define NVIC_ICPR0           REG32(0xE000E280)
+#define SCB_SCR              REG32(0xE000ED10)
+#define RTC1_IRQ_BIT         (1u << 17)
+static int idle_ready;
+static uint32_t idle_sleeps;
+uint32_t hal_idle_sleeps(void) { return idle_sleeps; }
+
+static void idle_init(void)
+{
+    RTC1_EVENTS_COMPARE0 = 0;
+    RTC1_INTENSET = 1u << 16;          /* COMPARE0 -> pending (no ISR) */
+    NVIC_ICPR0 = RTC1_IRQ_BIT;
+    SCB_SCR |= 1u << 4;                /* SEVONPEND */
+    idle_ready = 1;
+}
+
 void hal_delay_ms(unsigned ms)
 {
     uint32_t t0 = millis_raw();
-    while (millis_raw() - t0 < ms)
+    if (!idle_ready || ms < 2) {
+        while (millis_raw() - t0 < ms)
+            wdt_kick();
+        return;
+    }
+    for (;;) {
+        uint32_t el = millis_raw() - t0;
+        if (el >= ms)
+            break;
+        uint32_t left = ms - el;
+        if (left > 60000u)
+            left = 60000u;
+        uint32_t ticks = left * 32768u / 1000u;
+        if (ticks < 3)
+            ticks = 3;                 /* CC must be >= COUNTER + 2 */
+        RTC1_EVENTS_COMPARE0 = 0;
+        (void)RTC1_EVENTS_COMPARE0;
+        NVIC_ICPR0 = RTC1_IRQ_BIT;
+        RTC1_CC0 = (RTC1_COUNTER + ticks) & 0xFFFFFF;
         wdt_kick();
+        idle_sleeps++;
+        /* a stale event flag just makes this WFE return at once; the
+           loop re-arms and the next one sleeps */
+        __asm volatile ("dsb\n\twfe" ::: "memory");
+    }
+    RTC1_EVENTS_COMPARE0 = 0;
+    NVIC_ICPR0 = RTC1_IRQ_BIT;
+}
+
+/* on the charger: P0.19 POWER_PRESENT pulls low (InfiniTime PinMap) */
+int hal_on_charger(void)
+{
+    return (GPIO_IN & BIT(19)) == 0;
 }
 
 /* wall clock: seeded at boot, overwritten when the phone writes the
@@ -310,6 +368,10 @@ static void time_init(void)
     RTC1_START = 1;
     rtc_last = 0;
     rtc_ticks = 0;
+    /* power-present / charging pins as plain inputs (InfiniTime) */
+    GPIO_PIN_CNF(19) = 0;
+    GPIO_PIN_CNF(12) = 0;
+    idle_init();
 }
 
 /* ---- I2C (TWIM1) ------------------------------------------------------ */

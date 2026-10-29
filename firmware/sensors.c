@@ -152,6 +152,7 @@ static int32_t isqrt(int32_t v)
     return r;
 }
 
+static int eng_live;   /* the Bosch counter has counted at least once */
 static void bma_sample(uint32_t now)
 {
     uint8_t d[6];
@@ -170,9 +171,11 @@ static void bma_sample(uint32_t now)
        gesture in software over raw axes — the chip's wrist-wear flag
        never arrived reliably on this unit. 8 samples at 10 Hz (their
        poll rate; we decimate our 50 Hz sampler by 5). */
-    static int wh_decim;
-    if (++wh_decim >= 5) {
-        wh_decim = 0;
+    static uint32_t wh_last;
+    if (now - wh_last >= 95) {     /* time-based: same 10 Hz whatever the
+                                      sample rate (2.2.3 drops to 10 Hz
+                                      while the screen is off) */
+        wh_last = now;
         /* advance THEN write: wh_idx always points at the newest
            sample, matching the reference circular-buffer indexing */
         wh_idx = (wh_idx + 1) & (WH_N - 1);
@@ -204,14 +207,20 @@ static void bma_sample(uint32_t now)
         armed = 0;
         last_step_ms = now;
     }
-    if (bma_engine) {
+    /* the engine's counter only changes a step at a time: read it once
+       a second, not on every 20 ms sample (that was a second I2C burst
+       50 times a second, screen on or off) */
+    static uint32_t last_eng;
+    if (bma_engine && (now - last_eng >= 1000 || !last_eng)) {
+        last_eng = now ? now : 1;
         uint8_t s[4];
         if (i2c_read_reg(BMA_ADDR, 0x1E, s, 4)) {
             uint32_t eng = (uint32_t)s[0] | ((uint32_t)s[1] << 8) |
                            ((uint32_t)s[2] << 16) | ((uint32_t)s[3] << 24);
             steps = eng > 0 ? eng : fb_steps;
+            eng_live = eng > 0;
         }
-    } else {
+    } else if (!bma_engine) {
         steps = fb_steps;
     }
 }
@@ -701,6 +710,53 @@ void sensors_init(void)
 
 static unsigned hrs_retries, bma_retries;
 
+/* 2.2.3 battery: the HR LED ran 24/7 (screen off, off the wrist, on the
+   charger) at 12.5 mA pulses with a ~50 % duty cycle. Now it is live
+   only while the screen is on or a workout runs; with the screen off it
+   takes a background reading every HR_BG_PERIOD_MS (stops early once a
+   reading locks, gives up after HR_BG_MAX_MS) and none on the charger.
+   The manual HR switch still turns it off completely. */
+#define HR_BG_PERIOD_MS 300000u
+#define HR_BG_MAX_MS    60000u
+#define HR_BG_MIN_MS    15000u
+static int hr_live = 1, scr_on = 1;
+static int hr_bg_on;
+static uint32_t hr_bg_start, hr_bg_next;
+void sensors_set_mode(int screen_on, int hr_busy)
+{
+    scr_on = screen_on;
+    hr_live = screen_on || hr_busy;
+}
+int sensors_hr_powered(void) { return hrs_powered; }
+
+static int hr_want(uint32_t raw)
+{
+    if (!hr_on)
+        return 0;
+    if (hr_live) {
+        hr_bg_on = 0;
+        hr_bg_next = raw + HR_BG_PERIOD_MS;
+        return 1;
+    }
+    if (hal_on_charger()) {
+        hr_bg_on = 0;
+        return 0;
+    }
+    if (!hr_bg_on && (int32_t)(raw - hr_bg_next) >= 0) {
+        hr_bg_on = 1;
+        hr_bg_start = raw;
+    }
+    if (hr_bg_on) {
+        uint32_t el = raw - hr_bg_start;
+        int got = bpm_valid && (int32_t)(bpm_good_ms - hr_bg_start) > 0;
+        if (el >= HR_BG_MAX_MS || (got && el >= HR_BG_MIN_MS)) {
+            hr_bg_on = 0;
+            hr_bg_next = raw + HR_BG_PERIOD_MS;
+        }
+    }
+    return hr_bg_on;
+}
+
 void sensors_tick(uint32_t now)
 {
     static uint32_t last_bma, last_retry;
@@ -721,7 +777,12 @@ void sensors_tick(uint32_t now)
     /* use the unlatched clock: hal_millis() is frozen for a whole
        render frame. */
     uint32_t raw = hal_millis_raw();
-    if (bma_ok && now - last_bma >= 20) {   /* 50 Hz accel */
+    /* 50 Hz while the screen is on, HR is measuring (motion gate) or the
+       software step fallback is counting; 10 Hz otherwise — raise-to-wake
+       only needs its 10 Hz history and the Bosch engine counts steps on
+       the chip by itself */
+    uint32_t bma_iv = (!scr_on && bma_engine && eng_live && !hrs_powered) ? 100 : 20;
+    if (bma_ok && now - last_bma >= bma_iv) {
         last_bma = now;
         bma_sample(now);
         if (act_delta > HR_MOVE_MG) {        /* HR motion gate */
@@ -749,13 +810,18 @@ void sensors_tick(uint32_t now)
     /* power writes live here, not in sensors_hr_set: a blocking i2c
        transaction from inside an LVGL tap handler was the "crashed
        when I toggled heart rate" path — it ran mid-event-dispatch */
-    if (hrs_ok && !hr_on && hrs_powered) {
-        hrs_power(0);                   /* manual off: LED dark */
+    int want = hrs_ok && hr_want(raw);
+    if (hrs_ok && !want && hrs_powered) {
+        hrs_power(0);                   /* off or between readings: dark */
         hrs_powered = 0;
-        bpm_valid = 0;
-        bpm = 0;
+        if (!hr_on) {                   /* manual off drops the reading */
+            bpm_valid = 0;
+            bpm = 0;
+        } else {
+            hr_hold();                  /* duty-cycled: hold it, greyed */
+        }
         ppg_reset(1);
-    } else if (hrs_ok && hr_on && !hrs_powered) {
+    } else if (want && !hrs_powered) {
         hrs_power(1);
         hrs_powered = 1;
         ppg_reset(1);
@@ -803,6 +869,13 @@ int sensors_wrist_raise(void)
 {
     if (!bma_engine)
         return 0;
+    /* polled from every main-loop pass while the screen is off; 10 Hz
+       is plenty for a raise and saves ~30 I2C reads a second */
+    static uint32_t last_rd;
+    uint32_t t = hal_millis_raw();
+    if (t - last_rd < 100)
+        return 0;
+    last_rd = t;
     uint8_t v = 0;
     if (!i2c_read_reg(BMA_ADDR, 0x1C, &v, 1))
         return 0;

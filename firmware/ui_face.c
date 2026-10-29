@@ -9,6 +9,7 @@
 
 extern const lv_font_t kenney9, kenney12, kenney16, kenney24, kenney56;
 int sensors_bpm(void);
+int sensors_hr_on(void);
 int sensors_bpm_stale(void);   /* 1 = held last reading, show greyed */
 int ui_steps(void);
 int ui_steps_today(void);
@@ -202,13 +203,33 @@ static void bpm_label(lv_obj_t *lbl, uint32_t live_rgb)
     int bpm = sensors_bpm();
     int stale = bpm > 0 && sensors_bpm_stale();
     int key = bpm * 2 + stale;
+    if (!sensors_hr_on())
+        key = -2;                       /* sensor switched off */
     if (key == last_bpm)
         return;
+    if (key == -2) {
+        lv_label_set_text(lbl, "OFF");
+        lv_obj_set_style_text_color(lbl, lv_color_hex(BPM_STALE_RGB), 0);
+        last_bpm = key;
+        return;
+    }
     lv_snprintf(buf, sizeof buf, "%d", bpm > 0 ? bpm : 0);
     lv_label_set_text(lbl, bpm > 0 ? buf : "--");
     lv_obj_set_style_text_color(lbl, lv_color_hex(stale ? BPM_STALE_RGB
                                                         : live_rgb), 0);
     last_bpm = key;
+}
+
+/* 2.2.3: the heart is a still grey icon while the reading is held or
+   the sensor is off; only an animated heart needs the 8 Hz repaint */
+static int heart_needs_redraw(void)
+{
+    static int last_still = -1;
+    int rate = sensors_bpm();
+    int still = (rate > 0 && sensors_bpm_stale()) || !sensors_hr_on();
+    int need = !still || still != last_still;
+    last_still = still;
+    return need;
 }
 
 static void heart_draw(lv_event_t *ev)
@@ -222,7 +243,7 @@ static void heart_draw(lv_event_t *ev)
     /* pulse at the measured rate; shimmer when no lock; a held (stale)
        reading gets a still, grey heart: it's not being measured now */
     int rate = sensors_bpm();
-    int stale = rate > 0 && sensors_bpm_stale();
+    int stale = (rate > 0 && sensors_bpm_stale()) || !sensors_hr_on();
     int lit;
     if (stale) {
         lit = 0;
@@ -608,7 +629,13 @@ void ui_face_tick(void)
         /* 1 synced, 2 restored after a reboot/flash (shown grey, never
            trusted), 0 never set */
         int synced = hal_clock_synced() ? 1 : hal_clock_restored() ? 2 : 0;
-        if (min != last_min || sec != last_sec || synced != last_synced) {
+        /* HH:MM only changes once a minute: setting it every second
+           re-rendered the biggest label on the face 60x for nothing.
+           Hour is tracked too, so a phone time-zone change shows at once */
+        static int last_hm = -1;
+        int hm = hal_clock_hour() * 60 + min;
+        if (hm != last_hm || synced != last_synced) {
+            last_hm = hm;
             if (synced)
                 lv_snprintf(buf, sizeof buf, "%02d:%02d", hal_clock_hour(), min);
             else
@@ -655,6 +682,7 @@ void ui_face_tick(void)
         static uint32_t last_heart;
         if (frame_ms - last_heart >= 120) {
             last_heart = frame_ms;
+            if (heart_needs_redraw())
             lv_obj_invalidate(heart_obj);
         }
         return;
@@ -717,6 +745,7 @@ void ui_face_tick(void)
     static uint32_t last_heart;
     if (frame_ms - last_heart >= 120) {
         last_heart = frame_ms;
-        lv_obj_invalidate(heart_obj);
+        if (heart_needs_redraw())
+            lv_obj_invalidate(heart_obj);
     }
 }

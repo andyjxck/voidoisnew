@@ -135,6 +135,8 @@ static void buzz(int ms)
     hal_motor(1);
     motor_off_at = hal_millis() + (uint32_t)ms;
 }
+/* a second pulse, started by ui_tick once the first has ended */
+static uint32_t buzz2_at;
 
 #define PERSIST_ADDR 0x3F0000u   /* top sector, clear of the DFU region */
 struct persist {
@@ -2994,6 +2996,68 @@ static void build_diag(lv_obj_t *r)
 /* ---- dispatch ------------------------------------------------------------------ */
 
 #include "ui_phone.inc"
+#include "btn_sm.h"
+
+/* 2.2.3: brief toast on the top layer (not clickable: taps pass
+   through). Used by the double-press HR toggle. */
+static lv_obj_t *toast_box, *toast_lbl;
+static uint32_t toast_until;
+static void toast_show(const char *txt, uint32_t now)
+{
+    if (!toast_box) {
+        toast_box = lv_obj_create(lv_layer_top());
+        lv_obj_set_size(toast_box, 128, 36);
+        lv_obj_align(toast_box, LV_ALIGN_TOP_MID, 0, 16);
+        lv_obj_set_style_bg_color(toast_box, lv_color_hex(0x141922), 0);
+        lv_obj_set_style_bg_opa(toast_box, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(toast_box, 18, 0);
+        lv_obj_set_style_border_width(toast_box, 2, 0);
+        lv_obj_set_style_border_color(toast_box, C_ACCENT, 0);
+        lv_obj_set_style_pad_all(toast_box, 0, 0);
+        lv_obj_remove_flag(toast_box, LV_OBJ_FLAG_CLICKABLE |
+                                      LV_OBJ_FLAG_SCROLLABLE);
+        toast_lbl = lv_label_create(toast_box);
+        lv_obj_set_style_text_font(toast_lbl, &kenney16, 0);
+        lv_obj_set_style_text_color(toast_lbl, C_WHITE, 0);
+    }
+    lv_label_set_text(toast_lbl, txt);
+    lv_obj_center(toast_lbl);
+    lv_obj_remove_flag(toast_box, LV_OBJ_FLAG_HIDDEN);
+    toast_until = now + 1500;
+}
+
+static void toast_tick(uint32_t now)
+{
+    if (toast_box && toast_until && (int32_t)(now - toast_until) >= 0) {
+        toast_until = 0;
+        lv_obj_add_flag(toast_box, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* 2.2.3: double press of the side button toggles the heart-rate sensor.
+   Two short buzzes = on, one longer = off. A running workout keeps it
+   on (it needs the readings) and says so. Saved like the Settings
+   switch, so it survives a reboot. */
+static void hr_toggle_by_button(uint32_t now)
+{
+    if (w_active && sensors_hr_on()) {
+        toast_show("HR IN USE", now);
+        buzz(60);
+        return;
+    }
+    int on = !sensors_hr_on();
+    sensors_hr_set(on);
+    persist_mark();
+    if (on) {
+        buzz(35);
+        buzz2_at = now + 150;
+    } else {
+        buzz(60);
+    }
+    toast_show(on ? "HR ON" : "HR OFF", now);
+    if (cur == SCR_CARDIO || cur == SCR_SETTINGS)
+        rebuild();
+}
 
 static void rebuild(void)
 {
@@ -3075,11 +3139,17 @@ void ui_tick(void)
         ui_wake();
     /* side button as nav fallback while touch is unreliable: a release
        before the 3 s reset threshold steps through screens */
-    static int was_held;
+    static btn_sm_t bsm;
     uint32_t held = button_held_ms();
     if (held)
         last_input_ms = now;
-    if (was_held && !held) {
+    /* 2.2.3: decoded single / double press. Asleep or water-locked a
+       single acts on release at once; otherwise it waits out the 300 ms
+       double window so a double press never also navigates. */
+    int bev = btn_sm_step(&bsm, held != 0, now, asleep || water_lock);
+    if (bev == BTN_EV_DOUBLE) {
+        hr_toggle_by_button(now);
+    } else if (bev == BTN_EV_SINGLE) {
         if (asleep)
             ui_wake();
         else if (water_lock) {
@@ -3097,9 +3167,17 @@ void ui_tick(void)
         else
             nav_back();
     }
-    was_held = held != 0;
+    {
+        extern void sensors_set_mode(int screen_on, int hr_busy);
+        sensors_set_mode(!asleep, w_active);
+    }
     sensors_tick(now);
     overlay_tick(now);
+    toast_tick(now);
+    if (buzz2_at && (int32_t)(now - buzz2_at) >= 0) {
+        buzz2_at = 0;
+        buzz(35);
+    }
     if (timer_end_ms && now >= timer_end_ms) {
         timer_end_ms = 0;
         timer_done = 1;
@@ -3179,6 +3257,12 @@ void ui_tick(void)
     /* deferred flash write: 2 s after the last change, or on sleep */
     if (persist_dirty && now - persist_dirty_ms > 2000)
         persist_save();
+    /* 2.2.3: nothing is drawn while the panel sleeps, so the per-screen
+       updaters (second hand, heart beat, music clock, cardio trace) skip
+       too; the first tick after a wake brings every label up to date
+       before the first frame renders */
+    if (asleep)
+        return;
     switch (cur) {
     case SCR_FACE:
         ui_face_tick();

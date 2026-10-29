@@ -45,7 +45,9 @@ void hal_draw_rect(int x, int y, int w, int h, hal_color_t color);
 void hal_draw_rect_a(int x, int y, int w, int h, hal_color_t color,
                      unsigned alpha);
 void hal_present(void);
-void hal_delay_ms(unsigned ms);
+void hal_delay_ms(unsigned ms);   /* sleeps in WFE (2.2.3) */
+int hal_on_charger(void);          /* 1 on USB power (P0.19 low) */
+uint32_t hal_idle_sleeps(void);    /* WFE sleeps taken, for the diag screen */
 uint32_t hal_millis(void);
 int hal_clock_hour(void);
 int hal_clock_minute(void);

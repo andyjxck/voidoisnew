@@ -70,6 +70,56 @@ int ble_bond_count(void);
 static int d_repeat_pairs;      /* diag: re-pairs accepted */
 extern uint32_t hal_millis(void);
 
+/* 2.2.3 battery: advertising used NimBLE's default 30-60 ms interval
+   forever (and 100-150 ms for the compat advert while connected), about
+   20 radio bursts a second whenever the phone was away. Now: Apple's
+   recommended pattern, as InfiniTime does it — 20-29 ms for the first
+   30 s after boot, a disconnect or a mode change, then 1022.5 ms. */
+#define ADV_FAST_MS 30000u
+static uint32_t adv_fast_until;
+static void adv_fast_window(void) { adv_fast_until = hal_millis() + ADV_FAST_MS; }
+
+/* 2.2.3 battery: iOS opens the link at 30 ms with no peripheral latency
+   (33 radio wake-ups a second, all day). Ten seconds after connecting
+   (discovery and the ANCS burst done) we ask for 45-60 ms with latency 3:
+   the watch can skip up to three idle events, so it wakes ~4-6x a second
+   and never waits more than 240 ms. All values meet Apple's accessory
+   rules (min multiple of 15 ms, max >= min + 15, max x (lat+1) <= 2 s,
+   timeout > 3 x that). During a DFU it asks for 15-30 ms, no latency.
+   Asked once per connection per mode; a refusal is never re-asked. */
+static uint32_t cp_at;
+static int cp_state;            /* 0 none, 1 slow asked, 2 fast asked */
+static int d_cp_rc = -1, d_cp_status = -1, d_cp_itvl, d_cp_lat;
+int ble_diag_conn_itvl(void) { return d_cp_itvl; }
+int ble_diag_conn_lat(void) { return d_cp_lat; }
+static void conn_params_poll(uint32_t now)
+{
+    if (conn_handle == BLE_HS_CONN_HANDLE_NONE)
+        return;
+    extern int ble_dfu_busy(void);
+    int fast = ble_dfu_busy();
+    struct ble_gap_upd_params up;
+    memset(&up, 0, sizeof up);
+    if (fast && cp_state != 2) {
+        up.itvl_min = 12;               /* 15 ms */
+        up.itvl_max = 24;               /* 30 ms */
+        up.latency = 0;
+        up.supervision_timeout = 400;   /* 4 s */
+        d_cp_rc = ble_gap_update_params(conn_handle, &up);
+        cp_state = 2;
+    } else if (!fast && cp_state != 1 && (int32_t)(now - cp_at) >= 0) {
+        up.itvl_min = 36;               /* 45 ms */
+        up.itvl_max = 48;               /* 60 ms */
+        up.latency = 3;
+        up.supervision_timeout = 400;   /* 4 s > 3 x 240 ms */
+        d_cp_rc = ble_gap_update_params(conn_handle, &up);
+        if (d_cp_rc == 0 || d_cp_rc == BLE_HS_EALREADY)
+            cp_state = 1;
+        else
+            cp_at = now + 30000;        /* busy: try again later */
+    }
+}
+
 static int gap_cb(struct ble_gap_event *ev, void *arg)
 {
     (void)arg;
@@ -88,11 +138,36 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
             d_sec_rc = -1;
             sec_attempts = 0;
             sec_pending_at = hal_millis() + 1500;
+            cp_state = 0;
+            cp_at = hal_millis() + 10000;
+            {
+                struct ble_gap_conn_desc cd;
+                if (ble_gap_conn_find(conn_handle, &cd) == 0) {
+                    d_cp_itvl = cd.conn_itvl;
+                    d_cp_lat = cd.conn_latency;
+                }
+            }
             if (ble_compat)
                 ble_advertise();   /* keep InfiniLink able to see us */
         } else {
+            adv_fast_window();
             ble_advertise();
         }
+        break;
+    case BLE_GAP_EVENT_CONN_UPDATE: {
+        struct ble_gap_conn_desc cd;
+        d_cp_status = ev->conn_update.status;
+        if (ble_gap_conn_find(ev->conn_update.conn_handle, &cd) == 0) {
+            d_cp_itvl = cd.conn_itvl;
+            d_cp_lat = cd.conn_latency;
+        }
+        break;
+    }
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        /* the fast window ran out: carry on at the slow interval */
+        if (ev->adv_complete.reason == BLE_HS_ETIMEOUT &&
+            (!ble_connected() || ble_compat))
+            ble_advertise();
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         d_disc_reason = ev->disconnect.reason;
@@ -101,6 +176,8 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
         ancs_on_disconnect();
         ams_on_disconnect();
         phone_music_reset();
+        cp_state = 0;
+        adv_fast_window();
         ble_advertise();
         break;
     case BLE_GAP_EVENT_SUBSCRIBE:
@@ -182,6 +259,16 @@ static void ble_advertise(void)
     struct ble_gap_adv_params p;
     memset(&p, 0, sizeof p);
     p.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    int32_t fast_left = (int32_t)(adv_fast_until - hal_millis());
+    int32_t dur = BLE_HS_FOREVER;
+    if (!ble_connected() && fast_left > 100) {
+        p.itvl_min = 32;                /* 20 ms */
+        p.itvl_max = 47;                /* 29.4 ms */
+        dur = fast_left;                /* then ADV_COMPLETE -> slow */
+    } else {
+        p.itvl_min = 1636;              /* 1022.5 ms */
+        p.itvl_max = 1651;
+    }
     if (ble_compat) {
         ble_gap_adv_set_data(adv_c, sizeof adv_c);
         ble_gap_adv_rsp_set_data(rsp_c, sizeof rsp_c);
@@ -197,7 +284,7 @@ static void ble_advertise(void)
         p.conn_mode = BLE_GAP_CONN_MODE_UND;
     }
     d_adv_calls++;
-    d_adv_rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER,
+    d_adv_rc = ble_gap_adv_start(own_addr_type, NULL, dur,
                                  &p, gap_cb, NULL);
 }
 
@@ -213,6 +300,7 @@ void ble_set_compat(int on)
     ble_svc_gap_device_name_set(on ? "InfiniTime" : "VoidOS");
     if (ble_synced && ble_gap_adv_active())
         ble_gap_adv_stop();
+    adv_fast_window();             /* a new name: be quick to find */
     if (ble_synced)
         ble_advertise();
 }
@@ -225,6 +313,7 @@ static void on_sync(void)
     ble_synced = 1;
     ble_hs_id_infer_auto(0, &own_addr_type);
     ble_adv_on = ble_want;
+    adv_fast_window();
     ble_advertise();
 }
 
@@ -349,6 +438,7 @@ void ble_poll(void)
     {
         extern uint32_t hal_millis(void);
         uint32_t now = hal_millis();
+        conn_params_poll(now);
         if (ble_synced && ble_adv_on && now - adv_check_ms > 2000) {
             adv_check_ms = now;
             if (!ble_gap_adv_active() && (!ble_connected() || ble_compat))
@@ -405,6 +495,7 @@ void ble_set_enabled(int on)
         return;                      /* on_sync applies ble_want */
     ble_adv_on = ble_want;
     if (on) {
+        adv_fast_window();
         ble_advertise();
     } else {
         ble_gap_adv_stop();

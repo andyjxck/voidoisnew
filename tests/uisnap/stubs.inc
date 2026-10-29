@@ -7,6 +7,7 @@ void display_backlight(int l) { (void)l; }
 void display_sleep(int on) { (void)on; }
 void touch_sleep(int on) { (void)on; }
 void sensors_tick(uint32_t n) { (void)n; }
+void sensors_set_mode(int s, int b) { (void)s; (void)b; }
 int sensors_bma_ok(void) { return 1; }
 int sensors_bma_z(void) { return 900; }
 int sensors_hrs_ok(void) { return 1; }

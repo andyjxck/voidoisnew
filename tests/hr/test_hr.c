@@ -109,6 +109,7 @@ int i2c_write_regs(uint8_t a, uint8_t r, const uint8_t *s, unsigned n)
 { (void)a; (void)r; (void)s; (void)n; return 0; }
 void hal_delay_ms(uint32_t m) { T += m; }
 uint32_t hal_millis_raw(void) { return T; }
+int hal_on_charger(void) { return 0; }
 
 static int fails;
 

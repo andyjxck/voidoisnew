@@ -22,6 +22,11 @@ extern void hal_boot_confirm(void);
 int main(void)
 {
     wdt_kick();
+    /* 2.2.3 battery: switch the core supply from the LDO to the DC/DC
+       converter (the PineTime has the inductor; InfiniTime's main()
+       does the same). Same voltage, roughly 40 % less current for the
+       CPU and radio. */
+    REG32(0x40000578) = 1;                  /* POWER->DCDCEN */
     boot_last_stage = nimble_last_stage();  /* furthest stage of last run */
     boot_last_fault = nimble_last_fault();
     nimble_stage(0);                        /* 0 = reached app entry */
