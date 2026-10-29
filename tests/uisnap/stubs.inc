@@ -104,6 +104,7 @@ int ancs_count(void)
 int ancs_take_dirty(void) { return 0; }
 int ancs_take_new(void) { return 0; }
 uint32_t ancs_take_popup(void) { uint32_t u = snap_popup; snap_popup = 0; return u; }
+void ancs_set_muted(int on) { (void)on; }
 void ancs_dismiss(uint32_t u) { (void)u; }
 void ancs_positive(uint32_t u) { (void)u; }
 const struct ancs_notif_view *ancs_get(int i)

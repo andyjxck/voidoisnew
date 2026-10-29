@@ -33,9 +33,10 @@ build/test_ble_dfu: tests/dfu/test_ble_dfu.c firmware/nimble_port/src/ble_dfu.c
 	$(CC) $(CFLAGS) -Itests/dfu/stubs -Ifirmware tests/dfu/test_ble_dfu.c -o $@
 
 # HR pipeline: the real firmware/sensors.c HRS3300 code on synthetic PPG
-build/test_ble_units: tests/ble/test_ble_units.c firmware/nimble_port/src/gatt_owner.h firmware/nimble_port/src/ams_parse.h firmware/nimble_port/src/bondblob.c firmware/nimble_port/src/bondblob.h
+TINYCRYPT = firmware/vendor/nimble/ext/tinycrypt
+build/test_ble_units: tests/ble/test_ble_units.c firmware/nimble_port/src/gatt_owner.h firmware/nimble_port/src/ams_parse.h firmware/nimble_port/src/bondblob.c firmware/nimble_port/src/bondblob.h firmware/nimble_port/src/rpa_match.h
 	mkdir -p build
-	$(CC) -std=gnu11 -O1 -Wall -Wextra -Ifirmware tests/ble/test_ble_units.c -o $@
+	$(CC) -std=gnu11 -O1 -Wall -Wextra -Ifirmware -I$(TINYCRYPT)/include tests/ble/test_ble_units.c $(TINYCRYPT)/src/aes_encrypt.c $(TINYCRYPT)/src/utils.c -o $@
 
 # 2.2.2: notification store, app names, text folding, midnight reset
 build/test_store_daily: tests/ble/test_store_daily.c firmware/nimble_port/src/ancs_store.h firmware/daily.h

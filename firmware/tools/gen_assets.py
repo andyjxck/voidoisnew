@@ -155,10 +155,11 @@ def main():
 
     with open(LVGL_OUT, "w") as f:
         f.write('#include "lvgl.h"\n#include "src/font/lv_font_fmt_txt.h"\n\n')
-        for px in (9, 12, 16, 24, 56):
+        for px in (9, 12, 16, 24, 56, 72):
             # 2.2.3: the 56 px face/cardio digits only ever draw "-./0-9:"
-            # (45..58); the full ASCII set cost 67 KB of flash
-            first, last = (45, 58) if px == 56 else (FIRST, LAST)
+            # (45..58); the full ASCII set cost 67 KB of flash.
+            # 2.2.5: 72 px is the face's hours, the same digits-only set
+            first, last = (45, 58) if px >= 56 else (FIRST, LAST)
             font = ImageFont.truetype(os.path.join(FONTS, "Kenney Future.ttf"), px)
             ascent, descent = font.getmetrics()
             glyphs, bitmap = [(0, 0, 0, 0, 0, 0)], bytearray()

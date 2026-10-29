@@ -15,6 +15,11 @@
 #include "services/gatt/ble_svc_gatt.h"
 #include "host/ble_store.h"
 #include "host/util/util.h"
+/* 2.2.5: the connection record, to put a resolved identity on it */
+#include "vendor/nimble/nimble/host/src/ble_hs_priv.h"
+#include "tinycrypt/aes.h"
+#include "tinycrypt/constants.h"
+#include "rpa_match.h"
 #if __has_include("gen/version.h")
 #include "gen/version.h"
 #endif
@@ -68,6 +73,65 @@ void ble_bond_store_init(uint16_t sig);
 void ble_bond_store_poll(uint32_t now, int busy);
 int ble_bond_count(void);
 static int d_repeat_pairs;      /* diag: re-pairs accepted */
+static int d_rpa_res = -1;      /* diag: -1 not an RPA, 0 no IRK matched,
+                                   1 resolved to a bonded phone */
+
+/* ---- 2.2.5: resolve the phone's private address ---------------------------
+   See rpa_match.h. On connect, a resolvable private address is checked
+   against the IRK of every bond; on a match the connection is given that
+   bond's identity address (as an LL-privacy controller would have
+   reported it), so the key lookup, the saved subscriptions and repeat-
+   pairing all find the bond the phone still holds. */
+static int aes_be(const uint8_t key[16], const uint8_t in[16], uint8_t out[16])
+{
+    struct tc_aes_key_sched_struct ks;
+    if (tc_aes128_set_encrypt_key(&ks, key) != TC_CRYPTO_SUCCESS)
+        return -1;
+    return tc_aes_encrypt(out, in, &ks) == TC_CRYPTO_SUCCESS ? 0 : -1;
+}
+
+struct rpa_find {
+    const uint8_t *rpa;
+    ble_addr_t id;
+    int found;
+};
+
+static int rpa_find_cb(int obj_type, union ble_store_value *val, void *arg)
+{
+    struct rpa_find *f = arg;
+    (void)obj_type;
+    if (val->sec.irk_present && rpa_matches(val->sec.irk, f->rpa, aes_be)) {
+        f->id = val->sec.peer_addr;
+        f->found = 1;
+        return 1;                       /* stop iterating */
+    }
+    return 0;
+}
+
+static void peer_resolve(uint16_t h)
+{
+    struct ble_gap_conn_desc cd;
+    d_rpa_res = -1;
+    if (ble_gap_conn_find(h, &cd) != 0 ||
+        cd.peer_id_addr.type != BLE_ADDR_RANDOM ||
+        !rpa_is_resolvable(cd.peer_id_addr.val))
+        return;
+    struct rpa_find f = {cd.peer_id_addr.val, {0}, 0};
+    d_rpa_res = 0;
+    ble_store_iterate(BLE_STORE_OBJ_TYPE_PEER_SEC, rpa_find_cb, &f);
+    if (!f.found)
+        return;
+    ble_hs_lock();
+    struct ble_hs_conn *c = ble_hs_conn_find(h);
+    if (c && c->bhc_peer_addr.type == BLE_ADDR_RANDOM) {
+        c->bhc_peer_rpa_addr = c->bhc_peer_addr;
+        c->bhc_peer_addr.type = f.id.type == BLE_ADDR_PUBLIC
+                                ? BLE_ADDR_PUBLIC_ID : BLE_ADDR_RANDOM_ID;
+        memcpy(c->bhc_peer_addr.val, f.id.val, 6);
+        d_rpa_res = 1;
+    }
+    ble_hs_unlock();
+}
 extern uint32_t hal_millis(void);
 
 /* 2.2.3 battery: advertising used NimBLE's default 30-60 ms interval
@@ -128,6 +192,8 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
     case BLE_GAP_EVENT_CONNECT:
         if (ev->connect.status == 0) {
             conn_handle = ev->connect.conn_handle;
+            /* before anything asks for a key: name the bonded phone */
+            peer_resolve(conn_handle);
             /* ANCS discovery kicks off as soon as the link settles */
             ancs_on_connect(conn_handle);
             ams_on_connect(conn_handle);

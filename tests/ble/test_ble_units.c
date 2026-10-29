@@ -3,6 +3,7 @@
  *  - AMS PlaybackInfo parsing
  *  - the persistent bond blob: round trip, alternating slots, a torn
  *    write and a corrupt copy falling back to the previous one
+ *  - 2.2.5: resolving a phone's private address with its IRK
  */
 #include <stdio.h>
 #include <string.h>
@@ -11,6 +12,9 @@
 #include "nimble_port/src/ams_parse.h"
 #include "nimble_port/src/bondblob.h"
 #include "nimble_port/src/bondblob.c"
+#include "nimble_port/src/rpa_match.h"
+#include "tinycrypt/aes.h"
+#include "tinycrypt/constants.h"
 
 static int fails;
 #define CHECK(c) do { if (!(c)) { printf("FAIL %s:%d %s\n", __FILE__, \
@@ -153,11 +157,57 @@ static void test_bondblob(void)
         if (flash[a] != 0xFF) { CHECK(!"flash above bonds touched"); break; }
 }
 
+/* ---- 2.2.5 RPA resolution ------------------------------------------ */
+static int aes_tc(const uint8_t k[16], const uint8_t in[16], uint8_t out[16])
+{
+    struct tc_aes_key_sched_struct ks;
+    if (tc_aes128_set_encrypt_key(&ks, k) != TC_CRYPTO_SUCCESS)
+        return -1;
+    return tc_aes_encrypt(out, in, &ks) == TC_CRYPTO_SUCCESS ? 0 : -1;
+}
+
+static void test_rpa(void)
+{
+    /* AES-128 itself: FIPS-197 appendix C.1 */
+    static const uint8_t fk[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    static const uint8_t fp[16] = {0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,
+                                   0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff};
+    static const uint8_t fc[16] = {0x69,0xc4,0xe0,0xd8,0x6a,0x7b,0x04,0x30,
+                                   0xd8,0xcd,0xb7,0x80,0x70,0xb4,0xc5,0x5a};
+    uint8_t o[16];
+    CHECK(aes_tc(fk, fp, o) == 0 && memcmp(o, fc, 16) == 0);
+
+    /* Core spec Vol 3 Part H appendix D.7 (ah): IRK
+       ec0234a357c8ad05341010a60a397d9b, prand 708194 -> hash 0dfbaa.
+       IRK little-endian as SMP carries it, address bytes as on air. */
+    static const uint8_t be[16] = {0xec,0x02,0x34,0xa3,0x57,0xc8,0xad,0x05,
+                                   0x34,0x10,0x10,0xa6,0x0a,0x39,0x7d,0x9b};
+    uint8_t irk[16];
+    for (int i = 0; i < 16; i++)
+        irk[i] = be[15 - i];
+    uint8_t rpa[6] = {0xaa, 0xfb, 0x0d, 0x94, 0x81, 0x70};
+    CHECK(rpa_is_resolvable(rpa));
+    CHECK(rpa_matches(irk, rpa, aes_tc));
+    /* a different hash, a different IRK, a non-resolvable address */
+    uint8_t bad[6];
+    memcpy(bad, rpa, 6);
+    bad[0] ^= 1;
+    CHECK(!rpa_matches(irk, bad, aes_tc));
+    uint8_t irk2[16];
+    memcpy(irk2, irk, 16);
+    irk2[7] ^= 0x80;
+    CHECK(!rpa_matches(irk2, rpa, aes_tc));
+    uint8_t stat[6] = {0xaa, 0xfb, 0x0d, 0x94, 0x81, 0xF0};  /* static */
+    CHECK(!rpa_is_resolvable(stat));
+    CHECK(!rpa_matches(irk, stat, aes_tc));
+}
+
 int main(void)
 {
     test_owner();
     test_playback();
     test_bondblob();
+    test_rpa();
     if (fails) { printf("%d BLE unit checks failed\n", fails); return 1; }
     printf("PASS: all BLE unit checks\n");
     return 0;

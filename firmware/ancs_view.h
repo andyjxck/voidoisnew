@@ -23,5 +23,6 @@ int ancs_take_new(void);         /* a new, non-silent one arrived: buzz */
 uint32_t ancs_take_popup(void);  /* its text has arrived: uid to show */
 void ancs_dismiss(uint32_t uid);
 void ancs_positive(uint32_t uid);
+void ancs_set_muted(int on);     /* 2.2.5: CC ALERTS off = 1 */
 
 #endif

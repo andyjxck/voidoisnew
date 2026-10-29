@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <string.h>
 #include "ui_deco.h"
 #include "phone.h"
 #include <math.h>
@@ -7,13 +8,13 @@
 #include "board.h"
 #include "assets.h"
 
-extern const lv_font_t kenney9, kenney12, kenney16, kenney24, kenney56;
+extern const lv_font_t kenney9, kenney12, kenney16, kenney24, kenney56,
+                       kenney72;
 int sensors_bpm(void);
 int sensors_hr_on(void);
 int sensors_bpm_stale(void);   /* 1 = held last reading, show greyed */
 int ui_steps(void);
 int ui_steps_today(void);
-int ui_water_ml(void);
 int sensors_ppg(int i, int *out_y100);
 int sensors_hrs_ok(void);
 int hal_clock_synced(void);
@@ -271,8 +272,9 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font,
 }
 
 /* ---- digital face, 2.1 layout ------------------------------------------
-   y   8..49   water chip (left, tap -> water)   date block (right)
-   y  54..117  big time
+   y   8..49   date block, centred (2.2.5: the water chip went; WATER
+               lives in STATS)
+   y  40..120  big time: hours at 72 px, ":MM" at 56 px, one baseline
    y 124..164  now-playing chip while music plays (tap -> music),
                else a hex rule
    y 170..232  steps pill (cyan) + heart-rate pill (red), each 112x62 so
@@ -288,36 +290,18 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font,
 #define MUS_Y 123
 #define MUS_H 42
 
-static lv_obj_t *d_wt_val, *d_mus_hit, *d_mus_lbl, *d_mus_sub;
-static lv_obj_t *d_lbl_dow;
+static lv_obj_t *d_mus_hit, *d_mus_lbl, *d_mus_sub;
+static lv_obj_t *d_lbl_dow, *d_lbl_min;
 static lv_obj_t *art_obj;
-static int d_wt_ml = -1, d_mus_on = -1, d_mus_playing = -1;
-void ui_nav_open(int which);       /* ui_nav.c: 1 water, 2 music */
-int ui_water_ml(void);             /* ui_nav.c: today's water */
-#define WATER_GOAL 2000
-#define WT_BAR_X 42
-#define WT_BAR_W 66
-#define WT_BAR_Y (CHIP_Y + 29)
+static int d_mus_on = -1, d_mus_playing = -1;
+void ui_nav_open(int which);       /* ui_nav.c: 2 music */
+#define TIME_BASE 110              /* baseline of the big time */
 
 void ui_music_ascii(char *dst, const char *src, int cap);
 
 static void digi_draw(lv_event_t *ev)
 {
     lv_layer_t *l = lv_event_get_layer(ev);
-    /* water chip: drop, today's millilitres, progress to the goal */
-    int wt = d_wt_ml < 0 ? 0 : d_wt_ml;
-    dk_oct(l, 6, CHIP_Y, 108, CHIP_H, 9, DK_CYAN, 1, 28);
-    mi_draw(l, MI_WATER_DROP, 24, CHIP_Y + CHIP_H / 2 - 1, 20, DK_CYAN);
-    dk_rect(l, WT_BAR_X, WT_BAR_Y, WT_BAR_X + WT_BAR_W - 1, WT_BAR_Y + 3,
-            DK_DIM, LV_OPA_COVER);
-    {
-        int w = wt >= WATER_GOAL ? WT_BAR_W : WT_BAR_W * wt / WATER_GOAL;
-        if (w > 0)
-            dk_rect(l, WT_BAR_X, WT_BAR_Y, WT_BAR_X + w - 1, WT_BAR_Y + 3,
-                    DK_CYAN, LV_OPA_COVER);
-    }
-    /* date block: right-aligned, hex tick on the far edge */
-    dk_line(l, 228, CHIP_Y + 4, 228, CHIP_Y + CHIP_H - 4, DK_DIM, 2);
     /* middle: music chip or hex rule */
     if (d_mus_on > 0) {
         dk_oct(l, 18, MUS_Y, 204, MUS_H, 10, DK_RED, 2, 30);
@@ -363,25 +347,25 @@ static lv_obj_t *label_l(lv_obj_t *parent, const lv_font_t *font,
     return o;
 }
 
-/* refresh water + music chips; returns 1 when the art must repaint */
+/* place the two halves of the big time: centred as a pair, "HH" (72 px)
+   and ":MM" (56 px) sitting on one baseline */
+static void time_layout(void)
+{
+    const lv_font_t *fh = &kenney72, *fm = &kenney56;
+    const char *th = lv_label_get_text(d_lbl_time);
+    const char *tm = lv_label_get_text(d_lbl_min);
+    int wh = lv_text_get_width(th, (uint32_t)strlen(th), fh, 0);
+    int wm = lv_text_get_width(tm, (uint32_t)strlen(tm), fm, 0);
+    int x = (240 - wh - wm) / 2;
+    lv_obj_set_pos(d_lbl_time, x, TIME_BASE - (fh->line_height - fh->base_line));
+    lv_obj_set_pos(d_lbl_min, x + wh,
+                   TIME_BASE - (fm->line_height - fm->base_line));
+}
+
+/* refresh the music chip; returns 1 when the art must repaint */
 static int face_phone_refresh(void)
 {
     int dirty = 0;
-    int wt = ui_water_ml();
-    if (wt != d_wt_ml) {
-        /* six characters at most, so it fits the chip: 750 ML,
-           1.25 L, 10.0 L */
-        char b[16];
-        if (wt < 1000)
-            lv_snprintf(b, sizeof b, "%d ML", wt);
-        else if (wt < 10000)
-            lv_snprintf(b, sizeof b, "%d.%02d L", wt / 1000, wt % 1000 / 10);
-        else
-            lv_snprintf(b, sizeof b, "%d.%d L", wt / 1000, wt % 1000 / 100);
-        lv_label_set_text(d_wt_val, b);
-        d_wt_ml = wt;
-        dirty = 1;
-    }
     int on = music_active();
     const struct music *m = music_get();
     if (on != d_mus_on || (on && m->playing != d_mus_playing) ||
@@ -430,21 +414,22 @@ static void build_digital(lv_obj_t *scr)
     lv_obj_remove_flag(art, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(art, digi_draw, LV_EVENT_DRAW_MAIN, NULL);
 
-    /* water chip (tap target = the whole chip, 108x42) */
-    hit(scr, 6, CHIP_Y, 108, CHIP_H, 1);
-    d_wt_val = label_l(scr, &kenney16, 0xFFFFFF, WT_BAR_X - 2, CHIP_Y + 7, 72,
-                       LV_TEXT_ALIGN_LEFT, "0 ML");
-    lv_obj_set_height(d_wt_val, 18);
-    lv_label_set_long_mode(d_wt_val, LV_LABEL_LONG_DOT);
-    lv_obj_remove_flag(d_wt_val, LV_OBJ_FLAG_CLICKABLE);
+    /* date block, centred across the top */
+    d_lbl_dow = label_l(scr, &kenney12, 0x46D8E0, 20, CHIP_Y + 2, 200,
+                        LV_TEXT_ALIGN_CENTER, "---");
+    d_lbl_date = label_l(scr, &kenney16, 0xD8E0EC, 20, CHIP_Y + 18, 200,
+                         LV_TEXT_ALIGN_CENTER, "SYNC TIME");
 
-    /* date block */
-    d_lbl_dow = label_l(scr, &kenney12, 0x46D8E0, 118, CHIP_Y + 4, 104,
-                        LV_TEXT_ALIGN_RIGHT, "---");
-    d_lbl_date = label_l(scr, &kenney16, 0xD8E0EC, 120, CHIP_Y + 21, 102,
-                         LV_TEXT_ALIGN_RIGHT, "SYNC TIME");
-
-    d_lbl_time = label(scr, &kenney56, 0xFFFFFF, 0, 54, 240, "--:--");
+    /* big time in two labels: hours bigger than the minutes (2.2.5) */
+    d_lbl_time = lv_label_create(scr);
+    lv_obj_set_style_text_font(d_lbl_time, &kenney72, 0);
+    lv_obj_set_style_text_color(d_lbl_time, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_text(d_lbl_time, "--");
+    d_lbl_min = lv_label_create(scr);
+    lv_obj_set_style_text_font(d_lbl_min, &kenney56, 0);
+    lv_obj_set_style_text_color(d_lbl_min, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_text(d_lbl_min, ":--");
+    time_layout();
 
     /* now-playing chip, while music plays or was just paused: two
        one-line rows (2.2.1 let the title wrap over "NOW PLAYING") */
@@ -486,7 +471,6 @@ static void build_digital(lv_obj_t *scr)
     breath_start(d_lbl_bpm);
 
     last_bpm = last_steps = last_synced = last_dom = last_min = -1;
-    d_wt_ml = -1;
     d_mus_on = d_mus_playing = -1;
     face_phone_refresh();
 }
@@ -598,12 +582,19 @@ void ui_face_tick(void)
         if (hm != last_hm || synced != last_synced) {
             last_hm = hm;
             if (synced)
-                lv_snprintf(buf, sizeof buf, "%02d:%02d", hal_clock_hour(), min);
+                lv_snprintf(buf, sizeof buf, "%02d", hal_clock_hour());
             else
-                lv_snprintf(buf, sizeof buf, "--:--");
+                lv_snprintf(buf, sizeof buf, "--");
             lv_label_set_text(d_lbl_time, buf);
-            lv_obj_set_style_text_color(d_lbl_time,
-                lv_color_hex(synced == 2 ? 0x8A93A0 : 0xFFFFFF), 0);
+            if (synced)
+                lv_snprintf(buf, sizeof buf, ":%02d", min);
+            else
+                lv_snprintf(buf, sizeof buf, ":--");
+            lv_label_set_text(d_lbl_min, buf);
+            time_layout();
+            lv_color_t tc = lv_color_hex(synced == 2 ? 0x8A93A0 : 0xFFFFFF);
+            lv_obj_set_style_text_color(d_lbl_time, tc, 0);
+            lv_obj_set_style_text_color(d_lbl_min, tc, 0);
             last_sec = sec;
         }
         if (min != last_min || synced != last_synced) {

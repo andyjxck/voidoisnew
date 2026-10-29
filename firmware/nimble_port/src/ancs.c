@@ -192,9 +192,21 @@ static void on_ds(const uint8_t *d, int len)
         fetch_pump();                /* next one without waiting */
 }
 
+/* 2.2.5: the control centre ALERTS toggle. While muted, new and changed
+   phone notifications are ignored (no buzz, no pop-up, not listed);
+   removals still pass so the list never keeps one the phone cleared */
+static int muted;
+
+void ancs_set_muted(int on)
+{
+    muted = on ? 1 : 0;
+}
+
 static void on_ns(const uint8_t *d, int len)
 {
     if (len < 8)
+        return;
+    if (muted && d[0] != 2)
         return;
     uint8_t ev = d[0], flags = d[1], cat = d[2];
     uint32_t uid = d[4] | (d[5] << 8) |

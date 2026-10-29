@@ -55,6 +55,12 @@ static int brightness = 75;    /* 0-100 */
 static int torch_on, water_lock;
 static int dnd_on, airplane_on;
 static unsigned cc_hide;          /* 1=torch 2=water lock 4=find phone */
+/* 2.2.5: CC ALERTS turns phone notifications on and off; saved as bit
+   0x80 of the persisted cc_hide byte (set = off) so the record layout
+   and older saves stay as they were */
+static int alerts_on = 1;
+#define CC_ALERTS_OFF_BIT 0x80
+void ancs_set_muted(int on);
 static int bt_on = 1;
 
 int ble_connected(void);
@@ -261,7 +267,8 @@ static void persist_save_x(int sync)
     P.airplane = (uint8_t)airplane_on;
     P.water_lock = (uint8_t)water_lock;
     P.bt_on = (uint8_t)bt_on;
-    P.cc_hide = (uint8_t)cc_hide;
+    P.cc_hide = (uint8_t)((cc_hide & 0x7F) |
+                          (alerts_on ? 0 : CC_ALERTS_OFF_BIT));
     P.water_q = (uint8_t)(DL.water_ml / 250);
     P.alarm_on = (uint8_t)alarm_on;
     P.alarm_h = (uint8_t)alarm_h;
@@ -396,7 +403,9 @@ static void persist_load(void)
     /* never boot locked: a persisted lock was a trap */
     water_lock = 0;
     bt_on = P.bt_on;
-    cc_hide = P.cc_hide;
+    cc_hide = P.cc_hide & 0x7F;
+    alerts_on = !(P.cc_hide & CC_ALERTS_OFF_BIT);
+    ancs_set_muted(!alerts_on);
     alarm_on = P.alarm_on;
     if (P.alarm_h < 24 && P.alarm_m < 60) {
         alarm_h = P.alarm_h;
@@ -901,7 +910,7 @@ static int ccw_on(int d)
     case CCW_BT:     return bt_on;
     case CCW_AIR:    return airplane_on;
     case CCW_TORCH:  return torch_on;
-    case CCW_PHONE:  return ble_connected();
+    case CCW_PHONE:  return alerts_on;
     case CCW_LOCK:   return water_lock;
     }
     return 0;
@@ -937,9 +946,10 @@ static void ccw_activate(int d)
     case CCW_TORCH:
         torch_set(!torch_on);
         break;
-    case CCW_PHONE:
-        nav_to(SCR_NOTIF);
-        return;
+    case CCW_PHONE:                 /* 2.2.5: a toggle, not a shortcut */
+        alerts_on ^= 1;
+        ancs_set_muted(!alerts_on);
+        break;
     case CCW_LOCK:
         wlock_set(!water_lock);
         break;
@@ -1037,8 +1047,6 @@ static void ccw_draw(lv_event_t *e)
         lv_snprintf(v, sizeof v, "%s", bright_name());
     else if (fd == CCW_SET)
         lv_snprintf(v, sizeof v, "OPEN");
-    else if (fd == CCW_PHONE)
-        lv_snprintf(v, sizeof v, "%s", ccw_on(fd) ? "LINKED" : "OPEN");
     else
         lv_snprintf(v, sizeof v, "%s", ccw_on(fd) ? "ON" : "OFF");
     draw_txt_c(layer, &kenney16, ccw_on(fd) ? fc : C_MUTED, 120, CC_CY - 2, v);
@@ -1216,7 +1224,7 @@ static void build_cc(lv_obj_t *r)
    hex node joined to the hub by a thin trace. Drag sideways to move
    focus; tap the hub or any node to open that app. One canvas draws
    everything; input runs on the canvas object. */
-#define LC_N 8
+#define LC_N 5
 static const struct {
     const char *name;
     scr_t scr;
@@ -1225,9 +1233,8 @@ static const struct {
 } lc_apps[LC_N] = {
     {"WORKOUT",  SCR_WORKOUT,  G_WORKOUT,  LV_COLOR_MAKE(0xF0, 0x8C, 0x3C)},
     {"STATS",    SCR_STATS,    G_STATS,    LV_COLOR_MAKE(0x46, 0xD8, 0xE0)},
-    {"CARDIO",   SCR_CARDIO,   G_CARDIO,   LV_COLOR_MAKE(0xF0, 0x58, 0x6E)},
-    {"SLEEP",    SCR_SLEEP,    G_SLEEP,    LV_COLOR_MAKE(0xB0, 0x6C, 0xF0)},
-    {"WATER",    SCR_WATER,    G_WATER,    LV_COLOR_MAKE(0x40, 0xB0, 0xF0)},
+    /* 2.2.5: CARDIO, SLEEP and WATER left the apps screen; STATS opens
+       all three (HEART/REST, SLEEP, WATER) */
     {"CLOCK",    SCR_CLOCK,    G_CLOCK,    LV_COLOR_MAKE(0xF0, 0xD0, 0x40)},
     {"ALERTS",   SCR_NOTIF,    G_ALERTS,   LV_COLOR_MAKE(0x50, 0xE0, 0x78)},
     {"SETTINGS", SCR_SETTINGS, G_SETTINGS, LV_COLOR_MAKE(0x8A, 0x94, 0xA8)},
