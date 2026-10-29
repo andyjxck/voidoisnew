@@ -139,6 +139,29 @@ static void buzz(int ms)
 static uint32_t buzz2_at;
 
 #define PERSIST_ADDR 0x3F0000u   /* top sector, clear of the DFU region */
+/* 2.2.3: settings were one sector, erased then rewritten with no
+   checksum, so a reset or a flat battery in the middle of a save lost
+   every setting and the step total. Now two sectors take turns, each
+   record carries a sequence number and a CRC, and boot loads the newest
+   record that checks out. A 2.2.2 record (no CRC) in the first sector
+   is still read the first time, and the first save goes to the second
+   sector so that record survives until the new one is complete.
+   0x3F1000 is unused (bonds live at 0x3F3000-0x3F4FFF). */
+#define PERSIST_ADDR_B 0x3F1000u
+struct persist_tail { uint32_t magic, seq, crc; };
+#define PERSIST_TAIL_MAGIC 0x56544C32u     /* "VTL2" */
+static uint32_t persist_seq;
+static int persist_slot;          /* slot holding the newest good record */
+static uint32_t persist_crc(const uint8_t *p, unsigned n, uint32_t seq)
+{
+    uint32_t c = ~seq;
+    while (n--) {
+        c ^= *p++;
+        for (int k = 0; k < 8; k++)
+            c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+    }
+    return ~c;
+}
 struct persist {
     uint32_t magic;              /* 0x564F4944 = "VOID" */
     uint8_t ver;
@@ -248,15 +271,52 @@ static void persist_save(void)
         P.clock_dow = (uint8_t)dow;
         P.clock_ok = 1;
     }
+    struct persist_tail t;
+    t.magic = PERSIST_TAIL_MAGIC;
+    t.seq = ++persist_seq;
+    t.crc = persist_crc((const uint8_t *)&P, sizeof P, t.seq);
+    int slot = persist_slot ^ 1;
+    uint32_t a = slot ? PERSIST_ADDR_B : PERSIST_ADDR;
     spi_flash_init();
-    spi_flash_sector_erase(PERSIST_ADDR);
-    spi_flash_write(PERSIST_ADDR, (const uint8_t *)&P, sizeof P);
+    spi_flash_sector_erase(a);
+    spi_flash_write(a, (const uint8_t *)&P, sizeof P);
+    spi_flash_write(a + sizeof P, (const uint8_t *)&t, sizeof t);
+    persist_slot = slot;
+}
+
+/* 1 if the record at a is complete and its CRC checks; *seq gets its
+   sequence number */
+static int persist_read_slot(uint32_t a, uint32_t *seq)
+{
+    struct persist_tail t;
+    spi_flash_read(a, (uint8_t *)&P, sizeof P);
+    spi_flash_read(a + sizeof P, (uint8_t *)&t, sizeof t);
+    if (t.magic != PERSIST_TAIL_MAGIC || P.magic != 0x564F4944u ||
+        t.crc != persist_crc((const uint8_t *)&P, sizeof P, t.seq))
+        return 0;
+    *seq = t.seq;
+    return 1;
 }
 
 static void persist_load(void)
 {
+    uint32_t sa = 0, sb = 0;
     spi_flash_init();
-    spi_flash_read(PERSIST_ADDR, (uint8_t *)&P, sizeof P);
+    int okb = persist_read_slot(PERSIST_ADDR_B, &sb);
+    int oka = persist_read_slot(PERSIST_ADDR, &sa);
+    if (oka && (!okb || (int32_t)(sa - sb) > 0)) {
+        persist_slot = 0;              /* P already holds slot A */
+        persist_seq = sa;
+    } else if (okb) {
+        persist_read_slot(PERSIST_ADDR_B, &sb);
+        persist_slot = 1;
+        persist_seq = sb;
+    } else {
+        /* no checked record: a 2.2.2-or-older one in slot A, or none */
+        spi_flash_read(PERSIST_ADDR, (uint8_t *)&P, sizeof P);
+        persist_slot = 0;
+        persist_seq = 0;
+    }
     /* ver 3/4 load fine too: same layout. ver 3 had no hr_on, and that
        byte was struct padding copied from a zeroed P, so it read back
        as 0 = "heart rate off". 1.6.x then re-saved it as ver 4 with

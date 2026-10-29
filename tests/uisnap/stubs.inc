@@ -55,10 +55,29 @@ int ble_status(void) { return 2; }
 int ble_dfu_busy(void) { return 0; }
 void ble_link_diag(int *a, int *b, int *c, int *d, int *e)
 { *a = *b = *c = *d = *e = 0; }
+/* 2.2.3: the two settings sectors (0x3F0000, 0x3F1000) are kept in RAM
+   so the power-loss-safe save/load can be tested; elsewhere reads 0xFF */
+static uint8_t fake_nor[8192];
+static int fake_nor_init;
+static uint8_t *fake_at(uint32_t a)
+{
+    if (!fake_nor_init) { memset(fake_nor, 0xFF, sizeof fake_nor); fake_nor_init = 1; }
+    return (a >= 0x3F0000u && a < 0x3F2000u) ? fake_nor + (a - 0x3F0000u) : 0;
+}
 void spi_flash_init(void) {}
-void spi_flash_read(uint32_t a, uint8_t *b, unsigned n) { (void)a; memset(b, 0xFF, n); }
-void spi_flash_write(uint32_t a, const uint8_t *b, unsigned n) { (void)a; (void)b; (void)n; }
-void spi_flash_sector_erase(uint32_t a) { (void)a; }
+void spi_flash_read(uint32_t a, uint8_t *b, unsigned n)
+{
+    for (unsigned i = 0; i < n; i++) { uint8_t *p = fake_at(a + i); b[i] = p ? *p : 0xFF; }
+}
+void spi_flash_write(uint32_t a, const uint8_t *b, unsigned n)
+{
+    for (unsigned i = 0; i < n; i++) { uint8_t *p = fake_at(a + i); if (p) *p &= b[i]; }
+}
+void spi_flash_sector_erase(uint32_t a)
+{
+    uint8_t *p = fake_at(a & ~0xFFFu);
+    if (p) memset(p, 0xFF, 4096);
+}
 int ancs_cts_state(void) { return 0; }
 int ancs_sub_fail(void) { return 0; }
 void ble_bond_diag(int *a, int *b) { *a = 1; *b = 0; }

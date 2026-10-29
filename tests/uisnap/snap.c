@@ -854,6 +854,43 @@ int main(int argc, char **argv)
     shot(dir, SCR_CLOCK, "20_clock_alarm_snoozed"); alarm_snooze_mod = -1;
     shot(dir, SCR_CLOCK, "20_clock_alarm_on");
     tap_audit(dir);
+    /* 2.2.3 power-loss-safe settings: two slots, newest good one wins */
+    cur_name = "persist";
+    {
+        int keep_h = alarm_h, keep_m = alarm_m;
+        alarm_h = 6; alarm_m = 41; persist_save();      /* seq n   */
+        alarm_h = 7; alarm_m = 12; persist_save();      /* seq n+1 */
+        alarm_h = 0; alarm_m = 0; persist_load();
+        finding(alarm_h == 7 && alarm_m == 12 ? 0 : 1,
+                "settings: newest record loads (%02d:%02d)", alarm_h, alarm_m);
+        /* power cut mid-save: the slot being written is erased/partial */
+        alarm_h = 8; alarm_m = 30;
+        int slot = persist_slot ^ 1;
+        spi_flash_sector_erase(slot ? 0x3F1000u : 0x3F0000u);
+        spi_flash_write(slot ? 0x3F1000u : 0x3F0000u, (const uint8_t *)&P, 20);
+        alarm_h = 0; alarm_m = 0; persist_load();
+        finding(alarm_h == 7 && alarm_m == 12 ? 0 : 1,
+                "settings survive a power cut mid-save (%02d:%02d)", alarm_h, alarm_m);
+        /* flipped bit in the newest record: the older one is used */
+        alarm_h = 9; alarm_m = 5; persist_save();
+        fake_nor[(persist_slot ? 4096 : 0) + 8] ^= 0x10;
+        alarm_h = 0; alarm_m = 0; persist_load();
+        finding(alarm_h == 7 && alarm_m == 12 ? 0 : 1,
+                "corrupt newest record falls back to the older one (%02d:%02d)",
+                alarm_h, alarm_m);
+        /* a 2.2.2 record (no CRC tail) in slot A still loads */
+        memset(fake_nor, 0xFF, sizeof fake_nor);
+        alarm_h = 5; alarm_m = 55; persist_save();     /* goes to some slot */
+        memcpy(fake_nor, fake_nor + (persist_slot ? 4096 : 0), sizeof P);
+        memset(fake_nor + sizeof P, 0xFF, 64);
+        memset(fake_nor + 4096, 0xFF, 4096);
+        alarm_h = 0; alarm_m = 0; persist_load();
+        finding(alarm_h == 5 && alarm_m == 55 && persist_slot == 0 ? 0 : 1,
+                "2.2.2 settings record still loads (%02d:%02d)", alarm_h, alarm_m);
+        persist_save();
+        finding(persist_slot == 1 ? 0 : 1, "first 2.2.3 save leaves the 2.2.2 record alone");
+        alarm_h = keep_h; alarm_m = keep_m;
+    }
     cur_name = "";
     printf("wrote screens to %s; tap/text audit: %d checks, %d failed\n",
            dir, checks, fails);
