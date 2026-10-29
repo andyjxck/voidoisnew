@@ -259,7 +259,7 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font,
 }
 
 /* ---- digital face, 2.1 layout ------------------------------------------
-   y   8..49   weather chip (left, tap -> weather)   date block (right)
+   y   8..49   water chip (left, tap -> water)   date block (right)
    y  54..117  big time
    y 124..164  now-playing chip while music plays (tap -> music),
                else a hex rule
@@ -276,30 +276,40 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font,
 #define MUS_Y 123
 #define MUS_H 42
 
-static lv_obj_t *d_wx_hit, *d_wx_temp, *d_wx_city, *d_mus_hit, *d_mus_lbl;
+static lv_obj_t *d_wt_val, *d_mus_hit, *d_mus_lbl, *d_mus_sub;
 static lv_obj_t *d_lbl_dow;
 static lv_obj_t *art_obj;
-static int d_wx_icon = -2, d_mus_on = -1, d_mus_playing = -1;
-static uint32_t d_wx_rx;
-void ui_nav_open(int which);       /* ui_nav.c: 1 weather, 2 music */
+static int d_wt_ml = -1, d_mus_on = -1, d_mus_playing = -1;
+void ui_nav_open(int which);       /* ui_nav.c: 1 water, 2 music */
+int ui_water_ml(void);             /* ui_nav.c: today's water */
+#define WATER_GOAL 2000
+#define WT_BAR_X 42
+#define WT_BAR_W 66
+#define WT_BAR_Y (CHIP_Y + 29)
+
+/* water drop: a triangle on a disc */
+static void dk_drop(lv_layer_t *l, int cx, int cy, int s, lv_color_t c)
+{
+    dk_tri(l, cx, cy - s, cx - s * 3 / 4, cy + s / 4, cx + s * 3 / 4,
+           cy + s / 4, c, LV_OPA_COVER);
+    dk_arc(l, cx, cy + s / 4, s * 3 / 4, s * 3 / 4, 0, 360, c);
+}
 void ui_music_ascii(char *dst, const char *src, int cap);
 
 static void digi_draw(lv_event_t *ev)
 {
     lv_layer_t *l = lv_event_get_layer(ev);
-    /* weather chip */
-    int wxok = d_wx_icon >= 0;
-    dk_oct(l, 6, CHIP_Y, 108, CHIP_H, 9, wxok ? DK_CYAN : DK_DIM, 1,
-           wxok ? 28 : 0);
-    dk_wx_icon(l, wxok ? d_wx_icon : -1, 28, CHIP_Y + CHIP_H / 2, 12,
-               lv_color_white());
-    if (wxok) {
-        lv_obj_update_layout(d_wx_temp);
-        int tx = lv_obj_get_x(d_wx_temp);
-        lv_point_t sz;
-        lv_text_get_size(&sz, lv_label_get_text(d_wx_temp), &kenney16, 0, 0,
-                         LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        dk_deg(l, tx + sz.x + 2, CHIP_Y + 8, 3, DK_CYAN);
+    /* water chip: drop, today's millilitres, progress to the goal */
+    int wt = d_wt_ml < 0 ? 0 : d_wt_ml;
+    dk_oct(l, 6, CHIP_Y, 108, CHIP_H, 9, DK_CYAN, 1, 28);
+    dk_drop(l, 24, CHIP_Y + CHIP_H / 2 - 1, 9, DK_CYAN);
+    dk_rect(l, WT_BAR_X, WT_BAR_Y, WT_BAR_X + WT_BAR_W - 1, WT_BAR_Y + 3,
+            DK_DIM, LV_OPA_COVER);
+    {
+        int w = wt >= WATER_GOAL ? WT_BAR_W : WT_BAR_W * wt / WATER_GOAL;
+        if (w > 0)
+            dk_rect(l, WT_BAR_X, WT_BAR_Y, WT_BAR_X + w - 1, WT_BAR_Y + 3,
+                    DK_CYAN, LV_OPA_COVER);
     }
     /* date block: right-aligned, hex tick on the far edge */
     dk_line(l, 228, CHIP_Y + 4, 228, CHIP_Y + CHIP_H - 4, DK_DIM, 2);
@@ -348,33 +358,23 @@ static lv_obj_t *label_l(lv_obj_t *parent, const lv_font_t *font,
     return o;
 }
 
-/* refresh weather + music chips; returns 1 when the art must repaint */
+/* refresh water + music chips; returns 1 when the art must repaint */
 static int face_phone_refresh(void)
 {
     int dirty = 0;
-    const struct wx *w = wx_get();
-    int icon = w ? w->icon : -1;
-    uint32_t rx = w ? w->rx_ms : 0;
-    if (icon != d_wx_icon || rx != d_wx_rx) {
-        char b[24];
-        if (w) {
-            int t = w->temp >= 0 ? (w->temp + 50) / 100 : -((-w->temp + 50) / 100);
-            lv_snprintf(b, sizeof b, "%d", t);
-            lv_label_set_text(d_wx_temp, b);
-            lv_obj_set_style_text_color(d_wx_temp, lv_color_white(), 0);
-            /* the icon already says the sky; the 12 px line has room
-               for today's range, not "FEW CLOUDS" */
-            int hi = w->tmax >= 0 ? (w->tmax + 50) / 100 : -((-w->tmax + 50) / 100);
-            int lo = w->tmin >= 0 ? (w->tmin + 50) / 100 : -((-w->tmin + 50) / 100);
-            lv_snprintf(b, sizeof b, "H%d L%d", hi, lo);
-            lv_label_set_text(d_wx_city, b);
-        } else {
-            lv_label_set_text(d_wx_temp, "--");
-            lv_obj_set_style_text_color(d_wx_temp, lv_color_hex(0x5A6478), 0);
-            lv_label_set_text(d_wx_city, "NO DATA");
-        }
-        d_wx_icon = icon;
-        d_wx_rx = rx;
+    int wt = ui_water_ml();
+    if (wt != d_wt_ml) {
+        /* six characters at most, so it fits the chip: 750 ML,
+           1.25 L, 10.0 L */
+        char b[16];
+        if (wt < 1000)
+            lv_snprintf(b, sizeof b, "%d ML", wt);
+        else if (wt < 10000)
+            lv_snprintf(b, sizeof b, "%d.%02d L", wt / 1000, wt % 1000 / 10);
+        else
+            lv_snprintf(b, sizeof b, "%d.%d L", wt / 1000, wt % 1000 / 100);
+        lv_label_set_text(d_wt_val, b);
+        d_wt_ml = wt;
         dirty = 1;
     }
     int on = music_active();
@@ -382,9 +382,22 @@ static int face_phone_refresh(void)
     if (on != d_mus_on || (on && m->playing != d_mus_playing) ||
         (on && phone_take_face_dirty())) {
         if (on) {
+            /* line 1: the track, one line with "..."; line 2: the
+               artist while it plays, else PAUSED (never both on one) */
             char t[44];
-            ui_music_ascii(t, m->track[0] ? m->track : "PLAYING", sizeof t);
+            ui_music_ascii(t, m->track[0] ? m->track : "MUSIC", sizeof t);
             lv_label_set_text(d_mus_lbl, t);
+            if (!m->playing) {
+                lv_label_set_text(d_mus_sub, "PAUSED");
+                lv_obj_set_style_text_color(d_mus_sub, lv_color_hex(0xF0586E), 0);
+            } else if (m->artist[0]) {
+                ui_music_ascii(t, m->artist, sizeof t);
+                lv_label_set_text(d_mus_sub, t);
+                lv_obj_set_style_text_color(d_mus_sub, lv_color_hex(0x8A94A8), 0);
+            } else {
+                lv_label_set_text(d_mus_sub, "NOW PLAYING");
+                lv_obj_set_style_text_color(d_mus_sub, lv_color_hex(0xF0586E), 0);
+            }
             lv_obj_remove_flag(d_mus_hit, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(d_mus_hit, LV_OBJ_FLAG_HIDDEN);
@@ -412,31 +425,35 @@ static void build_digital(lv_obj_t *scr)
     lv_obj_remove_flag(art, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(art, digi_draw, LV_EVENT_DRAW_MAIN, NULL);
 
-    /* weather chip (tap target = the whole chip, 108x42) */
-    d_wx_hit = hit(scr, 6, CHIP_Y, 108, CHIP_H, 1);
-    d_wx_temp = label_l(scr, &kenney16, 0xFFFFFF, 46, CHIP_Y + 6, 60,
-                        LV_TEXT_ALIGN_LEFT, "--");
-    d_wx_city = label_l(scr, &kenney12, 0x8A94A8, 46, CHIP_Y + 24, 66,
-                        LV_TEXT_ALIGN_LEFT, "NO DATA");
-    lv_obj_remove_flag(d_wx_temp, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_remove_flag(d_wx_city, LV_OBJ_FLAG_CLICKABLE);
+    /* water chip (tap target = the whole chip, 108x42) */
+    hit(scr, 6, CHIP_Y, 108, CHIP_H, 1);
+    d_wt_val = label_l(scr, &kenney16, 0xFFFFFF, WT_BAR_X - 2, CHIP_Y + 7, 72,
+                       LV_TEXT_ALIGN_LEFT, "0 ML");
+    lv_obj_set_height(d_wt_val, 18);
+    lv_label_set_long_mode(d_wt_val, LV_LABEL_LONG_DOT);
+    lv_obj_remove_flag(d_wt_val, LV_OBJ_FLAG_CLICKABLE);
 
     /* date block */
     d_lbl_dow = label_l(scr, &kenney12, 0x46D8E0, 118, CHIP_Y + 4, 104,
                         LV_TEXT_ALIGN_RIGHT, "---");
-    d_lbl_date = label_l(scr, &kenney16, 0xD8E0EC, 104, CHIP_Y + 21, 118,
+    d_lbl_date = label_l(scr, &kenney16, 0xD8E0EC, 120, CHIP_Y + 21, 102,
                          LV_TEXT_ALIGN_RIGHT, "SYNC TIME");
 
     d_lbl_time = label(scr, &kenney56, 0xFFFFFF, 0, 54, 240, "--:--");
 
-    /* now-playing chip, only while music plays + phone linked */
+    /* now-playing chip, while music plays or was just paused: two
+       one-line rows (2.2.1 let the title wrap over "NOW PLAYING") */
     d_mus_hit = hit(scr, 18, MUS_Y, 204, MUS_H, 2);
-    d_mus_lbl = label_l(d_mus_hit, &kenney12, 0xFFFFFF, 46, 7, 150,
+    d_mus_lbl = label_l(d_mus_hit, &kenney12, 0xFFFFFF, 46, 6, 148,
                         LV_TEXT_ALIGN_LEFT, "");
+    lv_obj_set_height(d_mus_lbl, 14);
     lv_label_set_long_mode(d_mus_lbl, LV_LABEL_LONG_DOT);
-    lv_obj_t *np = label_l(d_mus_hit, &kenney12, 0xF0586E, 46, 22, 150,
-                           LV_TEXT_ALIGN_LEFT, "NOW PLAYING");
-    lv_obj_remove_flag(np, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(d_mus_lbl, LV_OBJ_FLAG_CLICKABLE);
+    d_mus_sub = label_l(d_mus_hit, &kenney12, 0xF0586E, 46, 22, 148,
+                        LV_TEXT_ALIGN_LEFT, "");
+    lv_obj_set_height(d_mus_sub, 14);
+    lv_label_set_long_mode(d_mus_sub, LV_LABEL_LONG_DOT);
+    lv_obj_remove_flag(d_mus_sub, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(d_mus_hit, LV_OBJ_FLAG_HIDDEN);
 
     /* steps pill: footprint + STEPS label row, value row below */
@@ -475,7 +492,7 @@ static void build_digital(lv_obj_t *scr)
     breath_start(d_lbl_bpm);
 
     last_bpm = last_steps = last_synced = last_dom = last_min = -1;
-    d_wx_icon = -2;
+    d_wt_ml = -1;
     d_mus_on = d_mus_playing = -1;
     face_phone_refresh();
 }
@@ -610,7 +627,7 @@ void ui_face_tick(void)
                the phone synced the clock, which read as a wrong date */
             if (synced == 2) {
                 lv_label_set_text(d_lbl_dow, "SYNCING TIME");
-                lv_label_set_text(d_lbl_date, "OPEN PHONE");
+                lv_label_set_text(d_lbl_date, "CONNECT");
             } else if (synced) {
                 static const char *dn[8] = {"", "MONDAY", "TUESDAY",
                                             "WEDNESDAY", "THURSDAY",
@@ -626,7 +643,7 @@ void ui_face_tick(void)
                 lv_label_set_text(d_lbl_date, buf);
             } else {
                 lv_label_set_text(d_lbl_dow, "TIME NOT SET");
-                lv_label_set_text(d_lbl_date, "OPEN PHONE");
+                lv_label_set_text(d_lbl_date, "CONNECT");
             }
         }
         static uint32_t last_phone;

@@ -106,14 +106,35 @@ static int cts_access(uint16_t conn, uint16_t attr,
 static struct music ms;
 static uint16_t ms_event_h;
 
+static uint32_t ms_pause_ms;      /* when it last stopped playing, 0 = never */
+
 const struct music *music_get(void) { return &ms; }
-int music_active(void) { return ms.playing && ble_connected(); }
+/* playing, or paused less than 10 minutes ago with a track loaded: the
+   face keeps its music chip so a paused song can be resumed (2.2.1 hid
+   it the moment you paused) */
+int music_active(void)
+{
+    if (!ble_connected())
+        return 0;
+    if (ms.playing)
+        return 1;
+    return ms.track[0] && ms_pause_ms &&
+           hal_millis() - ms_pause_ms < 10u * 60u * 1000u;
+}
+
+static void ms_set_playing(int p)
+{
+    if (ms.playing && !p)
+        ms_pause_ms = hal_millis() | 1;
+    ms.playing = p;
+}
 
 void phone_music_reset(void)            /* link dropped */
 {
     if (ms.playing)
         dirty = 3;
     ms.playing = 0;
+    ms_pause_ms = 0;
 }
 
 static void put_str(char *dst, int cap, const uint8_t *s, int len)
@@ -144,7 +165,7 @@ int phone_music_write(int id, const uint8_t *b, int len)
         if (!p && ms.playing && ms.len_s)  /* freeze the position */
             ms.pos_s += (hal_millis() - ms.pos_ms) / 1000;
         ms.pos_ms = hal_millis();
-        ms.playing = p;
+        ms_set_playing(p);
         break;
     }
     case 0x03: put_str(ms.artist, sizeof ms.artist, b, len); break;
@@ -164,7 +185,7 @@ void phone_music_ams(int playing, const char *artist, const char *track,
                      const char *album, int elapsed_s, int dur_s)
 {
     if (playing >= 0) {
-        ms.playing = playing;
+        ms_set_playing(playing);
         if (elapsed_s >= 0) {
             ms.pos_s = elapsed_s;
             ms.pos_ms = hal_millis();

@@ -40,8 +40,17 @@ static inline void dk_tri(lv_layer_t *l, int x0, int y0, int x1, int y1,
     lv_draw_triangle(l, &t);
 }
 
-static inline void dk_rect(lv_layer_t *l, int x1, int y1, int x2, int y2,
-                           lv_color_t c, lv_opa_t o)
+/* host renderer (tests/uisnap) records every card, hex and bar so its
+   audit can fail text that sits half on a shape's outline */
+#ifdef UISNAP_SHAPES
+void uisnap_shape(int kind, int a, int b, int c, int d, int e);
+#define DK_SHAPE(k, a, b, c, d, e) uisnap_shape(k, a, b, c, d, e)
+#else
+#define DK_SHAPE(k, a, b, c, d, e) ((void)0)
+#endif
+
+static inline void dk_rect_raw(lv_layer_t *l, int x1, int y1, int x2, int y2,
+                               lv_color_t c, lv_opa_t o)
 {
     if (x2 < x1 || y2 < y1)
         return;
@@ -53,15 +62,23 @@ static inline void dk_rect(lv_layer_t *l, int x1, int y1, int x2, int y2,
     lv_draw_rect(l, &r, &a);
 }
 
+static inline void dk_rect(lv_layer_t *l, int x1, int y1, int x2, int y2,
+                           lv_color_t c, lv_opa_t o)
+{
+    DK_SHAPE(3, x1, y1, x2, y2, 0);
+    dk_rect_raw(l, x1, y1, x2, y2, c, o);
+}
+
 /* chamfered card: optional tinted fill + neon stroke */
 static inline void dk_oct(lv_layer_t *l, int x, int y, int w, int h, int cut,
                           lv_color_t c, int lw, lv_opa_t fill)
 {
     int x2 = x + w - 1, y2 = y + h - 1;
+    DK_SHAPE(1, x, y, w, h, cut);
     if (fill) {
-        dk_rect(l, x + cut, y, x2 - cut, y2, c, fill);
-        dk_rect(l, x, y + cut, x + cut - 1, y2 - cut, c, fill);
-        dk_rect(l, x2 - cut + 1, y + cut, x2, y2 - cut, c, fill);
+        dk_rect_raw(l, x + cut, y, x2 - cut, y2, c, fill);
+        dk_rect_raw(l, x, y + cut, x + cut - 1, y2 - cut, c, fill);
+        dk_rect_raw(l, x2 - cut + 1, y + cut, x2, y2 - cut, c, fill);
         dk_tri(l, x + cut, y, x + cut, y + cut, x, y + cut, c, fill);
         dk_tri(l, x2 - cut, y, x2, y + cut, x2 - cut, y + cut, c, fill);
         dk_tri(l, x, y2 - cut, x + cut, y2 - cut, x + cut, y2, c, fill);
@@ -85,6 +102,7 @@ static inline void dk_hex(lv_layer_t *l, int cx, int cy, int r, lv_color_t c,
                           int lw)
 {
     int hw = r * 866 / 1000;
+    DK_SHAPE(2, cx, cy, r, 0, 0);
     const int px[6] = {cx, cx + hw, cx + hw, cx, cx - hw, cx - hw};
     const int py[6] = {cy - r, cy - r / 2, cy + r / 2, cy + r, cy + r / 2,
                        cy - r / 2};

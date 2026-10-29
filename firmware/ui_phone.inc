@@ -112,46 +112,59 @@ static uint32_t mus_pos_now(const struct music *m)
     return p;
 }
 
+/* 2.2.2 layout, top to bottom, nothing sharing a row:
+     card 42..109   title (one line, "..."), artist (one line), status
+     bar  117..120  progress
+     time 125..138  elapsed at the left, length at the right
+     hex  142..194  prev / play-pause / next
+     vol  200..231  */
+#define MU_CARD_Y 42
+#define MU_BAR_Y 118
+#define MU_TIME_Y 125
+#define MU_HEX_Y 168
+#define MU_VOL_Y 200
+
 static void mus_draw(lv_event_t *e)
 {
     lv_layer_t *l = lv_event_get_layer(e);
     const struct music *m = music_get();
     /* track card */
-    dk_oct(l, 12, 44, 216, 64, 8, DK_CYAN, 2, LV_OPA_TRANSP);
-    dk_music(l, DK_M_NOTE, 32, 70, 9, DK_RED);
+    dk_oct(l, 12, MU_CARD_Y, 216, 68, 8, DK_CYAN, 2, LV_OPA_TRANSP);
+    dk_music(l, DK_M_NOTE, 30, MU_CARD_Y + 23, 9, DK_RED);
     /* progress: thin dim rule, cyan fill */
     if (m->len_s) {
         int w = (int)(196u * mus_pos_now(m) / m->len_s);
-        dk_rect(l, 22, 118, 218, 119, DK_DIM, LV_OPA_COVER);
+        dk_rect(l, 22, MU_BAR_Y, 218, MU_BAR_Y + 1, DK_DIM, LV_OPA_COVER);
         if (w > 0)
-            dk_rect(l, 22, 117, 22 + w, 120, DK_CYAN, LV_OPA_COVER);
+            dk_rect(l, 22, MU_BAR_Y - 1, 22 + w, MU_BAR_Y + 2, DK_CYAN,
+                    LV_OPA_COVER);
     }
     /* transport: prev / play-pause (big red hex) / next */
-    dk_hex(l, 46, 160, 22, DK_DIM, 2);
-    dk_music(l, DK_M_PREV, 46, 160, 9, lv_color_white());
-    dk_hex(l, 120, 160, 30, DK_RED, 2);
-    dk_hex(l, 120, 160, 25, DK_DIMR, 1);
-    dk_music(l, m->playing ? DK_M_PAUSE : DK_M_PLAY, 122, 160, 11,
+    dk_hex(l, 46, MU_HEX_Y, 20, DK_DIM, 2);
+    dk_music(l, DK_M_PREV, 46, MU_HEX_Y, 8, lv_color_white());
+    dk_hex(l, 120, MU_HEX_Y, 26, DK_RED, 2);
+    dk_hex(l, 120, MU_HEX_Y, 21, DK_DIMR, 1);
+    dk_music(l, m->playing ? DK_M_PAUSE : DK_M_PLAY, 122, MU_HEX_Y, 10,
              lv_color_white());
-    dk_hex(l, 194, 160, 22, DK_DIM, 2);
-    dk_music(l, DK_M_NEXT, 194, 160, 9, lv_color_white());
+    dk_hex(l, 194, MU_HEX_Y, 20, DK_DIM, 2);
+    dk_music(l, DK_M_NEXT, 194, MU_HEX_Y, 8, lv_color_white());
     if (music_vol_ok()) {
-        dk_oct(l, 16, 200, 98, 34, 6, DK_DIM, 1, LV_OPA_TRANSP);
-        dk_music(l, DK_M_VOLDN, 65, 217, 8, DK_CYAN);
-        dk_oct(l, 126, 200, 98, 34, 6, DK_DIM, 1, LV_OPA_TRANSP);
-        dk_music(l, DK_M_VOLUP, 175, 217, 8, DK_CYAN);
+        dk_oct(l, 16, MU_VOL_Y, 98, 32, 6, DK_DIM, 1, LV_OPA_TRANSP);
+        dk_music(l, DK_M_VOLDN, 65, MU_VOL_Y + 16, 8, DK_CYAN);
+        dk_oct(l, 126, MU_VOL_Y, 98, 32, 6, DK_DIM, 1, LV_OPA_TRANSP);
+        dk_music(l, DK_M_VOLUP, 175, MU_VOL_Y + 16, 8, DK_CYAN);
     }
 }
 
-static void mus_pos_text(char *b, int cap, const struct music *m)
+static void mus_mmss(char *b, int cap, uint32_t s)
 {
-    uint32_t p = mus_pos_now(m);
-    if (m->len_s)
-        lv_snprintf(b, cap, "%u:%02u / %u:%02u", (unsigned)(p / 60),
-                    (unsigned)(p % 60), (unsigned)(m->len_s / 60),
-                    (unsigned)(m->len_s % 60));
-    else
-        lv_snprintf(b, cap, "%s", m->playing ? "PLAYING" : "PAUSED");
+    lv_snprintf(b, cap, "%u:%02u", (unsigned)(s / 60), (unsigned)(s % 60));
+}
+
+/* PLAYING / PAUSED, or STOPPED when the phone has no track at all */
+static const char *mus_status(const struct music *m)
+{
+    return !m->track[0] ? "STOPPED" : m->playing ? "PLAYING" : "PAUSED";
 }
 
 static void build_music(lv_obj_t *r)
@@ -161,22 +174,38 @@ static void build_music(lv_obj_t *r)
     mk_header(r, "MUSIC", 1);
     const struct music *m = music_get();
     char t[44];
-    ui_music_ascii(t, m->track[0] ? m->track : "UNKNOWN TRACK", sizeof t);
-    lv_obj_t *tl = mk_label(r, &kenney16, C_WHITE, 50, 54, t);
-    lv_label_set_long_mode(tl, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(tl, 168);
-    ui_music_ascii(t, m->artist[0] ? m->artist : "", sizeof t);
-    lv_obj_t *al = mk_label(r, &kenney12, C_MUTED, 50, 78, t);
-    lv_label_set_long_mode(al, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(al, 168);
-    mus_pos_text(t, sizeof t, m);
-    mus_pos_lbl = mk_label_c(r, &kenney12, C_MUTED, 120, 124, t);
-    mk_hit(r, 12, 134, 66, 54, mus_cb, MU_PREV);
-    mk_hit(r, 84, 128, 72, 66, mus_cb, MU_TOGGLE);
-    mk_hit(r, 162, 134, 66, 54, mus_cb, MU_NEXT);
+    ui_music_ascii(t, m->track[0] ? m->track : "NOTHING PLAYING", sizeof t);
+    lv_obj_t *tl = mk_line(r, &kenney16, C_WHITE, 48, MU_CARD_Y + 6, 170, t);
+    {
+        /* a title too long for its line scrolls along it, so the whole
+           name can be read; it never wraps */
+        lv_point_t sz;
+        lv_text_get_size(&sz, t, &kenney16, 0, 0, LV_COORD_MAX,
+                         LV_TEXT_FLAG_NONE);
+        if (sz.x > 170)
+            lv_label_set_long_mode(tl, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    }
+    /* artist, else the album; nothing when the phone sent neither */
+    const char *who = m->artist[0] ? m->artist : m->album;
+    if (who[0] && m->track[0]) {
+        ui_music_ascii(t, who, sizeof t);
+        mk_line(r, &kenney12, C_MUTED, 48, MU_CARD_Y + 27, 170, t);
+    }
+    mk_label(r, &kenney12, m->playing ? C_ACCENT : C_MUTED, 48,
+             MU_CARD_Y + 45, mus_status(m));
+    mus_pos_lbl = NULL;
+    if (m->len_s) {
+        mus_mmss(t, sizeof t, mus_pos_now(m));
+        mus_pos_lbl = mk_label(r, &kenney12, C_MUTED, 22, MU_TIME_Y, t);
+        mus_mmss(t, sizeof t, m->len_s);
+        mk_label_r(r, &kenney12, C_MUTED, 219, MU_TIME_Y, t);
+    }
+    mk_hit(r, 12, MU_HEX_Y - 28, 66, 56, mus_cb, MU_PREV);
+    mk_hit(r, 84, MU_HEX_Y - 30, 72, 60, mus_cb, MU_TOGGLE);
+    mk_hit(r, 162, MU_HEX_Y - 28, 66, 56, mus_cb, MU_NEXT);
     if (music_vol_ok()) {
-        mk_hit(r, 14, 198, 102, 40, mus_cb, MU_VOLDN);
-        mk_hit(r, 124, 198, 102, 40, mus_cb, MU_VOLUP);
+        mk_hit(r, 14, MU_VOL_Y - 2, 102, 40, mus_cb, MU_VOLDN);
+        mk_hit(r, 124, MU_VOL_Y - 2, 102, 40, mus_cb, MU_VOLUP);
     }
     mus_shown_playing = m->playing;
 }
@@ -197,11 +226,9 @@ static void music_tick(void)
     uint32_t now = hal_millis();
     if (now - last >= 1000 && mus_pos_lbl) {
         last = now;
-        char t[24];
-        mus_pos_text(t, sizeof t, m);
+        char t[16];
+        mus_mmss(t, sizeof t, mus_pos_now(m));
         lv_label_set_text(mus_pos_lbl, t);
-        lv_obj_update_layout(mus_pos_lbl);
-        lv_obj_set_x(mus_pos_lbl, 120 - lv_obj_get_width(mus_pos_lbl) / 2);
         lv_obj_invalidate(mus_art);
     }
 }

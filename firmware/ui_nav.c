@@ -335,6 +335,28 @@ static lv_obj_t *mk_label(lv_obj_t *parent, const lv_font_t *font,
     return l;
 }
 
+/* one line of text ending in "..." when it is too long. LONG_DOT on a
+   label whose height follows its content wraps instead (2.2.1's music
+   title ran onto a second line and over the artist): pin the height. */
+static lv_obj_t *mk_line(lv_obj_t *parent, const lv_font_t *font,
+                         lv_color_t c, int x, int y, int w, const char *s)
+{
+    lv_obj_t *l = mk_label(parent, font, c, x, y, s);
+    lv_obj_set_size(l, w, lv_font_get_line_height(font));
+    lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+    return l;
+}
+
+/* the same, right-aligned so its last character ends at x_end */
+static lv_obj_t *mk_label_r(lv_obj_t *parent, const lv_font_t *font,
+                            lv_color_t c, int x_end, int y, const char *s)
+{
+    lv_obj_t *l = mk_label(parent, font, c, 0, y, s);
+    lv_obj_update_layout(l);
+    lv_obj_set_x(l, x_end - lv_obj_get_width(l));
+    return l;
+}
+
 static lv_obj_t *mk_label_c(lv_obj_t *parent, const lv_font_t *font,
                             lv_color_t c, int x, int y, const char *s)
 {
@@ -521,6 +543,9 @@ static void rebuild(void);
 static scr_t nav_stack[6];
 static int nav_sp;
 static void notif_reset_view(void);
+static void notif_close(void);
+static int notif_swipe_page(int dir);
+static int notif_lpage;
 static uint32_t notif_sel_uid;
 
 /* Screen transitions were removed (1.6.2): full-screen software-rendered
@@ -536,8 +561,10 @@ static void nav_to(scr_t s)
     if (s == SCR_SETTINGS && cur != SCR_SETTINGS && cur != SCR_SETTIME &&
         cur != SCR_DIAG)
         set_page = 0;
-    if (cur == SCR_NOTIF && s != SCR_NOTIF)
+    if (cur == SCR_NOTIF && s != SCR_NOTIF) {
         notif_reset_view();
+        notif_lpage = 0;
+    }
     if (s == SCR_FACE || s == SCR_CC || s == SCR_LAUNCHER) {
         nav_sp = 0;
     } else if (s != cur) {
@@ -558,8 +585,10 @@ static void nav_back(void)
 {
     if (nav_sp) {
         scr_t to = nav_stack[--nav_sp];
-        if (cur == SCR_NOTIF)
+        if (cur == SCR_NOTIF) {
             notif_reset_view();
+            notif_lpage = 0;
+        }
         back_target = nav_sp ? nav_stack[nav_sp - 1] : SCR_FACE;
         cur = to;
         rebuild();
@@ -607,15 +636,17 @@ static void dir_nav(int cst_dir, int start_x)
         if (cst_dir == 1 || cst_dir == 2)
             nav_to(SCR_FACE);
     } else if (cur == SCR_NOTIF) {
-        /* every other screen uses dir 4 (L->R) as back; NOTIF alone
-           answered dir 3 — swipes looked dead on this screen only */
+        /* sideways = back (detail -> list -> where you came from);
+           up = next page of the list or of a long message, down =
+           the page before */
         if (cst_dir == 3 || cst_dir == 4) {
-            if (notif_sel_uid) {
-                notif_reset_view();
-                rebuild();
-            } else {
+            if (notif_sel_uid)
+                notif_close();
+            else
                 nav_back();
-            }
+        } else if (cst_dir == 1 || cst_dir == 2) {
+            notif_swipe_page(cst_dir == 2 ? 1 : -1);
+            swipe_handled = 1;
         }
     } else if (cur == SCR_CARDIO) {
         if (cst_dir == 4)
@@ -972,6 +1003,7 @@ static void hex_stroke(lv_layer_t *layer, int cx, int cy, int r,
                        lv_color_t c, int w)
 {
     int hw = r * 866 / 1000;
+    DK_SHAPE(2, cx, cy, r, 0, 0);
     const int px[6] = {cx, cx + hw, cx + hw, cx, cx - hw, cx - hw};
     const int py[6] = {cy - r, cy - r / 2, cy + r / 2,
                        cy + r, cy + r / 2, cy - r / 2};
@@ -1451,7 +1483,18 @@ static void lc_draw(lv_event_t *e)
     hex_stroke(layer, 120, LC_CY, LC_HUB - 6,
                lv_color_mix(fc, lv_color_black(), 170), 1);
     draw_glyph(layer, lc_apps[lc_focus].glyph, 120, LC_CY - 14, 16, fc);
-    draw_txt_c(layer, &kenney16, fc, 120, LC_CY + 12, lc_apps[lc_focus].name);
+    /* the name in 16 when it fits inside the inner hex, else 12:
+       WORKOUT and SETTINGS in 16 ran over both hex outlines */
+    {
+        const char *nm = lc_apps[lc_focus].name;
+        lv_point_t sz;
+        lv_text_get_size(&sz, nm, &kenney16, 0, 0, LV_COORD_MAX,
+                         LV_TEXT_FLAG_NONE);
+        if (sz.x <= 2 * ((LC_HUB - 6) * 866 / 1000) - 8)
+            draw_txt_c(layer, &kenney16, fc, 120, LC_CY + 12, nm);
+        else
+            draw_txt_c(layer, &kenney12, fc, 120, LC_CY + 14, nm);
+    }
 }
 
 static void lc_event(lv_event_t *e)
@@ -1722,12 +1765,16 @@ static void water_cb(lv_event_t *e)
     rebuild();
 }
 
+static int st_yday(int i, char *b, int n);
 static void build_water(lv_obj_t *r)
 {
     page_bg(r);
     mk_header(r, "WATER", 1);
+    char buf[32];
+    /* 2.2.2: yesterday's total, kept by the midnight reset */
+    if (st_yday(5, buf, sizeof buf))
+        mk_label_c(r, &kenney12, C_MUTED, 120, 48, buf);
     mk_card(r, 20, 70, 200, 94, C_FILL);
-    char buf[24];
     lv_snprintf(buf, sizeof buf, "%d ML", DL.water_ml);
     mk_label_c(r, &kenney24, C_ACCENT, 120, 82, buf);
     mk_label_c(r, &kenney12, C_MUTED, 120, 118, "GOAL 2000 ML");
@@ -2144,19 +2191,55 @@ static void st_value(int i, char *v, char *u)
     }
 }
 
+/* yesterday's total for the stat in the hub, as "YESTERDAY 11234";
+   "27 OCT 11234" when the last day the watch saw was not yesterday;
+   returns 0 when there is nothing to show */
+static int st_yday(int i, char *b, int n)
+{
+    static const char *mon[12] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
+    if (!DL.y_day)
+        return 0;
+    char when[12];
+    if (daily_have_yesterday(&DL)) {
+        lv_snprintf(when, sizeof when, "YESTERDAY");
+    } else {
+        int m = (int)(DL.y_day / 100 % 100);
+        lv_snprintf(when, sizeof when, "%d %s", (int)(DL.y_day % 100),
+                    m >= 1 && m <= 12 ? mon[m - 1] : "");
+    }
+    switch (i) {
+    case 0: lv_snprintf(b, n, "%s %u", when, (unsigned)DL.y_steps); return 1;
+    case 2:
+        if (!DL.y_rest)
+            return 0;
+        lv_snprintf(b, n, "%s %d BPM", when, DL.y_rest);
+        return 1;
+    case 3:
+        lv_snprintf(b, n, "%s %u KCAL", when, (unsigned)(DL.y_steps * 4 / 100));
+        return 1;
+    case 5: lv_snprintf(b, n, "%s %u ML", when, (unsigned)DL.y_water); return 1;
+    }
+    return 0;
+}
+
 /* 2.0: the node row spreads to the full width (40 px pitch, was 35)
    with 17 px hexes (were 14); each node takes taps out to ST_SAT_HIT px,
    nearest node wins, and the workout strip below takes the whole
    bottom band. */
-#define ST_CY       106
-#define ST_HUB_HIT  58
-#define ST_SAT      17
+/* 2.2.2: the hub holds the glyph, the value and the name; what the
+   value is (TODAY, LAST NIGHT...) and yesterday's total sit under it,
+   clear of the hex (2.2.1 hung TODAY / LEARNING over its lower edges) */
+#define ST_CY       94
+#define ST_HUB_R    52
+#define ST_HUB_HIT  56
+#define ST_SAT      16
 #define ST_SAT_HIT  30
 #define ST_STRIP_Y0 210
 static void st_pos(int i, int *x, int *y)
 {
     *x = 19 + i * 40;
-    *y = 186;
+    *y = 190;
 }
 
 /* tap -> -2 workout strip, ST_N hub, 0..ST_N-1 node, -1 nothing */
@@ -2195,17 +2278,27 @@ static void st_draw(lv_event_t *e)
                    foc ? st_def[i].col : lv_color_hex(0x5A6478));
     }
     lv_color_t fc = st_def[st_focus].col;
-    hex_stroke(layer, 120, 106, 54, fc, 2);
-    hex_stroke(layer, 120, 106, 49,
+    hex_stroke(layer, 120, ST_CY, ST_HUB_R, fc, 2);
+    hex_stroke(layer, 120, ST_CY, ST_HUB_R - 5,
                lv_color_mix(fc, lv_color_black(), 170), 1);
-    draw_glyph(layer, st_def[st_focus].glyph, 120, 82, 11, fc);
-    char v[16], u[12];
+    draw_glyph(layer, st_def[st_focus].glyph, 120, ST_CY - 28, 10, fc);
+    char v[16], u[12], y[32];
     st_value(st_focus, v, u);
-    draw_txt_c(layer, &kenney24, fc, 120, 96, v);
-    draw_txt_c(layer, &kenney12, lv_color_hex(0x8A94A8), 120, 124,
+    /* the big font while it fits the hex's middle band, else 16 */
+    lv_point_t sz;
+    lv_text_get_size(&sz, v, &kenney24, 0, 0, LV_COORD_MAX,
+                     LV_TEXT_FLAG_NONE);
+    if (sz.x <= 74)
+        draw_txt_c(layer, &kenney24, fc, 120, ST_CY - 18, v);
+    else
+        draw_txt_c(layer, &kenney16, fc, 120, ST_CY - 13, v);
+    draw_txt_c(layer, &kenney12, lv_color_hex(0x8A94A8), 120, ST_CY + 6,
                st_def[st_focus].name);
-    draw_txt_c(layer, &kenney12, lv_color_mix(fc, lv_color_black(), 140),
-               120, 136, u);
+    draw_txt_c(layer, &kenney12, lv_color_mix(fc, lv_color_white(), 200),
+               120, ST_CY + 52, u);
+    if (st_yday(st_focus, y, sizeof y))
+        draw_txt_c(layer, &kenney12, lv_color_hex(0x5A6478), 120,
+                   ST_CY + 65, y);
     /* workout status strip — tap opens the workout app */
     lv_draw_rect_dsc_t bo;
     lv_draw_rect_dsc_init(&bo);
@@ -2291,24 +2384,26 @@ static void build_stats(lv_obj_t *r)
 
 /* ---- notifications -------------------------------------------------------- */
 
-int ancs_ready(void), ancs_state(void), ancs_count(void);
-int ancs_take_dirty(void), ancs_take_new(void);
-struct ancs_notif_view {
-    uint32_t uid; uint8_t flags; uint8_t has_pos, has_neg;
-    const char *app, *title, *msg; uint32_t rx_ms;
-};
-const struct ancs_notif_view *ancs_get(int i);
-void ancs_dismiss(uint32_t uid);
-void ancs_positive(uint32_t uid);
+/* 2.2.2: the store (nimble_port/src/ancs_store.h) hands out app name,
+   title, subtitle, body and the phone's date; ancs_get() returns one
+   shared view, so read it before the next call */
+#include "ancs_view.h"
 
 /* selection is by uid (declared near the nav stack), never by list
    index: the list reorders as notifications arrive and clear */
 static int notif_reply;            /* 1 = action confirm open */
+static int notif_dpage;            /* detail page of a long message */
+static int notif_dpages = 1;
+static int notif_popup;            /* detail opened by a new arrival:
+                                      back returns to where you were */
+#define NOTIF_ROWS 3
 
 static void notif_reset_view(void)
 {
     notif_sel_uid = 0;
     notif_reply = 0;
+    notif_dpage = 0;
+    notif_popup = 0;
 }
 
 static const struct ancs_notif_view *notif_selected(void)
@@ -2321,21 +2416,86 @@ static const struct ancs_notif_view *notif_selected(void)
     return NULL;
 }
 
+/* when it arrived, short enough for the corner of a row: the phone's
+   own time ("9:41") today, the date ("27 OCT") before that, and the
+   watch's age of it ("5M") if the phone sent no date */
+static void notif_when(const struct ancs_notif_view *v, char *b, int n)
+{
+    static const char *mon[12] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
+    if (v->date && v->mod >= 0) {
+        int y, mo, d, dow;
+        hal_clock_date(&y, &mo, &d, &dow);
+        uint32_t today = (uint32_t)(y * 10000 + mo * 100 + d);
+        if (v->date == today || !hal_clock_synced()) {
+            lv_snprintf(b, n, "%d:%02d", v->mod / 60, v->mod % 60);
+            return;
+        }
+        int vm = (int)(v->date / 100 % 100);
+        lv_snprintf(b, n, "%d %s", (int)(v->date % 100),
+                    vm >= 1 && vm <= 12 ? mon[vm - 1] : "");
+        return;
+    }
+    unsigned mins = (hal_millis() - v->rx_ms) / 60000u;
+    if (mins < 1)
+        lv_snprintf(b, n, "NOW");
+    else if (mins < 60)
+        lv_snprintf(b, n, "%uM", mins);
+    else if (mins < 24 * 60)
+        lv_snprintf(b, n, "%uH", mins / 60);
+    else
+        lv_snprintf(b, n, "%uD", mins / (24 * 60));
+}
+
+/* headline and preview for a row: the sender or title, else the
+   subtitle, else the message itself */
+static void notif_lines(const struct ancs_notif_view *v, const char **head,
+                        const char **prev)
+{
+    if (v->title[0]) {
+        *head = v->title;
+        *prev = v->msg[0] ? v->msg : v->sub;
+    } else if (v->sub[0]) {
+        *head = v->sub;
+        *prev = v->msg;
+    } else if (v->msg[0]) {
+        *head = v->msg;
+        *prev = "";
+    } else {
+        *head = "(NO TEXT)";
+        *prev = "";
+    }
+}
+
 static void notif_item_cb(lv_event_t *e)
 {
-    int i = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
-    const struct ancs_notif_view *v = ancs_get(i);
-    if (v) {
-        notif_sel_uid = v->uid;
+    uint32_t uid =
+        (uint32_t)(uintptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    notif_reset_view();
+    notif_sel_uid = uid;
+    rebuild();
+}
+
+/* back from a detail: to the list, or to the screen a pop-up covered */
+static void notif_close(void)
+{
+    int pop = notif_popup;
+    notif_reset_view();
+    if (pop)
+        nav_back();
+    else
         rebuild();
-    }
 }
 
 static void notif_back_cb(lv_event_t *e)
 {
     (void)e;
-    notif_reset_view();
-    rebuild();
+    if (notif_reply) {
+        notif_reply = 0;
+        rebuild();
+        return;
+    }
+    notif_close();
 }
 
 static void notif_dismiss_cb(lv_event_t *e)
@@ -2344,8 +2504,7 @@ static void notif_dismiss_cb(lv_event_t *e)
     const struct ancs_notif_view *v = notif_selected();
     if (v)
         ancs_dismiss(v->uid);
-    notif_reset_view();
-    rebuild();
+    notif_close();
 }
 
 static void notif_reply_cb(lv_event_t *e)
@@ -2363,8 +2522,201 @@ static void notif_send_cb(lv_event_t *e)
     const struct ancs_notif_view *v = notif_selected();
     if (v)
         ancs_positive(v->uid);
-    notif_reset_view();
+    notif_close();
+}
+
+/* swipe up / down on the alerts screen: through the list's pages, or
+   through a long message. Returns 1 when it moved. */
+static int notif_swipe_page(int dir)
+{
+    if (notif_sel_uid) {
+        int np = notif_dpage + dir;
+        if (notif_reply || np < 0 || np >= notif_dpages)
+            return 0;
+        notif_dpage = np;
+    } else {
+        int n = ancs_count();
+        int last = n ? (n - 1) / NOTIF_ROWS : 0;
+        int np = notif_lpage + dir;
+        if (np < 0 || np > last)
+            return 0;
+        notif_lpage = np;
+    }
     rebuild();
+    return 1;
+}
+
+/* a new notification's text arrived: show it, on top of whatever is
+   open, unless the wearer is busy (DND, water lock, alarm, workout) */
+static void notif_popup_show(uint32_t uid)
+{
+    if (!uid || dnd_on || water_lock || alarm_ringing || w_active ||
+        cur == SCR_SETTIME)
+        return;
+    if (cur != SCR_NOTIF) {
+        nav_to(SCR_NOTIF);
+        notif_reset_view();
+        notif_popup = 1;
+    } else {
+        int pop = notif_popup;           /* keep where back returns to */
+        notif_reset_view();
+        notif_popup = pop;
+    }
+    notif_sel_uid = uid;
+    rebuild();
+}
+
+/* body text of a long message, laid out as whole lines at width W:
+   page 0 shares the screen with the title, later pages are all body */
+#define NB_W 208
+#define NB_LH 14                         /* kenney12 line height */
+#define NB_MAXL 16
+static char notif_body_page[128];
+/* LVGL's own line breaker (src/misc/lv_text_private.h), so pages break
+   exactly where the label would */
+uint32_t lv_text_get_next_line(const char *txt, uint32_t len,
+                               const lv_font_t *font, int32_t letter_space,
+                               int32_t max_width, int32_t *used_width,
+                               lv_text_flag_t flag);
+
+static int notif_body_lines(const char *msg, uint16_t *start)
+{
+    int n = 0;
+    uint32_t len = strlen(msg), i = 0;
+    while (i < len && n < NB_MAXL) {
+        start[n++] = (uint16_t)i;
+        uint32_t adv = lv_text_get_next_line(msg + i, len - i, &kenney12, 0,
+                                             NB_W, NULL, LV_TEXT_FLAG_NONE);
+        if (!adv)
+            break;
+        i += adv;
+    }
+    start[n] = (uint16_t)len;
+    return n;
+}
+
+static void notif_slice(const char *msg, const uint16_t *start, int from,
+                        int to)
+{
+    int a = start[from], b = start[to];
+    if (b - a > (int)sizeof notif_body_page - 1)
+        b = a + (int)sizeof notif_body_page - 1;
+    memcpy(notif_body_page, msg + a, b - a);
+    notif_body_page[b - a] = 0;
+    /* a line that broke on a space keeps it at its end: trim */
+    while (b > a && notif_body_page[b - a - 1] == ' ')
+        notif_body_page[--b - a] = 0;
+}
+
+static void build_notif_detail(lv_obj_t *r, const struct ancs_notif_view *v)
+{
+    char when[12];
+    notif_when(v, when, sizeof when);
+
+    /* top row: back, app name, time; hairline as on every screen */
+    lv_obj_t *bk = mk_btn(r, "<", 4, 4, 40, 30, C_BG, notif_back_cb);
+    lv_obj_set_ext_click_area(bk, 8);
+    lv_obj_t *tl = mk_label_r(r, &kenney12, C_MUTED, 226, 14, when);
+    int tx = lv_obj_get_x(tl);
+    mk_line(r, &kenney12, (v->flags & 0x01) ? C_MUTED : C_ACCENT, 54, 14,
+            tx - 8 - 54, v->app);
+    lv_obj_t *line = lv_obj_create(r);
+    lv_obj_set_pos(line, 12, 37);
+    lv_obj_set_size(line, 216, 1);
+    lv_obj_set_style_bg_color(line, C_EDGE, 0);
+    lv_obj_set_style_border_width(line, 0, 0);
+    lv_obj_remove_flag(line, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    /* what the lines hold: title (2 lines max), subtitle, then body */
+    const char *title = v->title[0] ? v->title : v->sub;
+    const char *sub = v->title[0] ? v->sub : "";
+    const char *body = v->msg;
+    if (!title[0] && !body[0])
+        title = "(NO TEXT)";
+
+    uint16_t ls[NB_MAXL + 1];
+    int nl = body[0] ? notif_body_lines(body, ls) : 0;
+
+    /* page 0 layout: measured, so the body always starts below the
+       title's real last line (2.2.1 put it at a fixed y and long
+       titles ran into it) */
+    int y = 42, body_y0;
+    lv_obj_t *t = NULL;
+    if (title[0]) {
+        t = mk_label(r, &kenney16, C_WHITE, 16, y, title);
+        lv_obj_set_width(t, NB_W);
+        lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP);
+        lv_obj_update_layout(t);
+        if (lv_obj_get_height(t) > 2 * 18) {   /* 3+ lines: cut at 2 */
+            lv_obj_set_height(t, 2 * 18);
+            lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
+        }
+        y += lv_obj_get_height(t) + 4;
+    }
+    int sub_y = y;
+    if (sub[0])
+        y += NB_LH + 4;
+    body_y0 = y;
+
+    int bottom = 176;                         /* buttons start at 182 */
+    int fit0 = (bottom - body_y0) / NB_LH;
+    if (nl <= fit0) {
+        notif_dpages = 1;
+    } else {
+        bottom = 160;                         /* room for "1/2" */
+        fit0 = (bottom - body_y0) / NB_LH;
+        if (fit0 < 0)
+            fit0 = 0;
+        int fitn = (bottom - 42) / NB_LH;
+        notif_dpages = 1 + (nl - fit0 + fitn - 1) / fitn;
+    }
+    if (notif_dpage >= notif_dpages)
+        notif_dpage = notif_dpages - 1;
+
+    if (notif_dpage == 0) {
+        if (sub[0])
+            mk_line(r, &kenney12, C_ACCENT, 16, sub_y, NB_W, sub);
+        if (nl) {
+            int to = nl < fit0 ? nl : fit0;
+            if (to > 0) {
+                notif_slice(body, ls, 0, to);
+                lv_obj_t *m = mk_label(r, &kenney12, C_MUTED, 16, body_y0,
+                                       notif_body_page);
+                lv_obj_set_width(m, NB_W);
+                lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
+            }
+        }
+    } else {
+        /* later pages: body only, line-aligned from the top */
+        if (t)
+            lv_obj_delete(t);
+        int fitn = (bottom - 42) / NB_LH;
+        int from = fit0 + (notif_dpage - 1) * fitn;
+        int to = from + fitn < nl ? from + fitn : nl;
+        notif_slice(body, ls, from, to);
+        lv_obj_t *m = mk_label(r, &kenney12, C_MUTED, 16, 42,
+                               notif_body_page);
+        lv_obj_set_width(m, NB_W);
+        lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
+    }
+
+    if (notif_reply) {
+        mk_label_c(r, &kenney12, C_MUTED, 120, 163, "OPEN ON PHONE TO REPLY?");
+        mk_btn(r, "YES", 16, 182, 100, 42, C_ACCENT, notif_send_cb);
+        mk_btn(r, "NO", 124, 182, 100, 42, C_FILL, notif_back_cb);
+        return;
+    }
+    if (notif_dpages > 1) {
+        char pg[24];
+        lv_snprintf(pg, sizeof pg, notif_dpage + 1 < notif_dpages
+                    ? "SWIPE UP  %d/%d" : "%d/%d", notif_dpage + 1,
+                    notif_dpages);
+        mk_label_c(r, &kenney12, C_MUTED, 120, 163, pg);
+    }
+    if (v->has_pos)
+        mk_btn(r, "REPLY", 16, 182, 100, 42, C_FILL, notif_reply_cb);
+    mk_btn(r, "DISMISS", v->has_pos ? 124 : 16, 182,
+           v->has_pos ? 100 : 208, 42, C_FILL, notif_dismiss_cb);
 }
 
 static void build_notif(lv_obj_t *r)
@@ -2372,51 +2724,31 @@ static void build_notif(lv_obj_t *r)
     page_bg(r);
 
     if (notif_sel_uid) {
-        /* detail: app + title + body, actions at the bottom */
         const struct ancs_notif_view *v = notif_selected();
-        if (!v) {
-            notif_reset_view();
-            rebuild();
+        if (v) {
+            build_notif_detail(r, v);
             return;
         }
-        lv_obj_set_ext_click_area(
-            mk_btn(r, "<", 12, 10, 36, 26, C_FILL, notif_back_cb), 8);
-        lv_obj_t *an = mk_label(r, &kenney12, C_MUTED, 56, 16,
-                                v->app[0] ? v->app : "NOTIFICATION");
-        lv_obj_set_width(an, 168);       /* app names run to 19 chars */
-        lv_label_set_long_mode(an, LV_LABEL_LONG_DOT);
-        lv_obj_t *t = mk_label(r, &kenney16, C_WHITE, 16, 44,
-                               v->title[0] ? v->title : "(NO TITLE)");
-        lv_obj_set_width(t, 208);
-        lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP);
-        lv_obj_t *m = mk_label(r, &kenney12, C_MUTED, 16, 78, v->msg);
-        lv_obj_set_width(m, 208);
-        lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
-
-        char ago[16];
-        unsigned mins = (hal_millis() - v->rx_ms) / 60000u;
-        lv_snprintf(ago, sizeof ago, mins ? "%uM AGO" : "JUST NOW", mins);
-        mk_label(r, &kenney12, C_MUTED, 160, 16, ago);
-        if (notif_reply) {
-            mk_label_c(r, &kenney12, C_MUTED, 120, 158,
-                       "OPEN ON PHONE AND REPLY?");
-            mk_btn(r, "YES", 16, 182, 100, 42, C_ACCENT, notif_send_cb);
-            mk_btn(r, "NO", 124, 182, 100, 42, C_FILL, notif_back_cb);
-        } else {
-            if (v->has_pos)
-                mk_btn(r, "REPLY", 16, 182, 100, 42, C_FILL,
-                       notif_reply_cb);
-            mk_btn(r, "DISMISS", v->has_pos ? 124 : 16,
-                   182, v->has_pos ? 100 : 208, 42, C_FILL,
-                   notif_dismiss_cb);
+        /* it was cleared on the phone meanwhile */
+        int pop = notif_popup;
+        notif_reset_view();
+        if (pop) {
+            nav_back();
+            return;
         }
-        return;
     }
 
+    int n = ancs_count();
+    int pages = n ? (n - 1) / NOTIF_ROWS + 1 : 1;
+    if (notif_lpage >= pages)
+        notif_lpage = pages - 1;
     {
         char tt[24];
-        int n = ancs_count();
-        lv_snprintf(tt, sizeof tt, n ? "ALERTS (%d)" : "ALERTS", n);
+        if (pages > 1)
+            lv_snprintf(tt, sizeof tt, "ALERTS %d/%d", notif_lpage + 1,
+                        pages);
+        else
+            lv_snprintf(tt, sizeof tt, n ? "ALERTS (%d)" : "ALERTS", n);
         mk_header(r, tt, 0);
     }
 
@@ -2426,56 +2758,52 @@ static void build_notif(lv_obj_t *r)
                    "PAIR FOR NOTIFICATIONS");
         return;
     }
-    if (ancs_state() < 6 /* ST_LIVE */) {
+    if (ancs_state() < 6 /* ST_LIVE */ && !n) {
         mk_label_c(r, &kenney12, C_MUTED, 120, 110, "SYNCING...");
         mk_label_c(r, &kenney12, C_MUTED, 120, 130,
                    "ANCS HANDSHAKE");
         return;
     }
-    if (!ancs_count()) {
+    if (!n) {
         mk_icon_at(r, 13, 0, 108, 80);   /* cloud */
         mk_label_c(r, &kenney16, C_WHITE, 120, 118, "INBOX ZERO");
         mk_label_c(r, &kenney12, C_MUTED, 120, 140, "ALL CAUGHT UP");
         return;
     }
 
-    for (int i = 0; i < ancs_count() && i < 4; i++) {
+    /* three rows a page, 58 px each: app + time, sender or title,
+       message preview; every line is one line with "..." */
+    for (int k = 0; k < NOTIF_ROWS; k++) {
+        int i = notif_lpage * NOTIF_ROWS + k;
         const struct ancs_notif_view *v = ancs_get(i);
         if (!v)
-            continue;
-        int y = 40 + i * 48;
+            break;
+        int y = 42 + k * 62;
         lv_obj_t *row = lv_obj_create(r);
         lv_obj_set_pos(row, 12, y);
-        lv_obj_set_size(row, 216, 44);
-        /* chamfered-outline card, like the concept list items */
-        /* neon pill: cyan for ones that alerted, dim for silent */
-        lv_obj_set_style_bg_color(row, (v->flags & 0x01) ? C_EDGE
-                                       : lv_color_hex(0x0B0E14), 0);
+        lv_obj_set_size(row, 216, 58);
+        /* neon pill: cyan edge for ones that alerted, dim for silent */
+        lv_obj_set_style_bg_color(row, (v->flags & 0x01)
+                                       ? lv_color_hex(0x0B0E14) : C_EDGE, 0);
         lv_obj_set_style_radius(row, 0, 0);
         lv_obj_set_style_pad_all(row, 0, 0);
         pill_style(row);
         lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_user_data(row, (void *)(intptr_t)i);
+        lv_obj_set_user_data(row, (void *)(uintptr_t)v->uid);
+        lv_obj_add_event_cb(row, tap_filter, LV_EVENT_CLICKED, NULL);
         lv_obj_add_event_cb(row, notif_item_cb, LV_EVENT_CLICKED, NULL);
-        /* accent dot for notifications that alerted (not silent) */
-        if (v->flags & 0x01)
-            goto labels;
-        lv_obj_t *dot = lv_obj_create(row);
-        lv_obj_set_pos(dot, 8, 18);
-        lv_obj_set_size(dot, 7, 7);
-        lv_obj_set_style_bg_color(dot, C_WARN, 0);
-        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(dot, 0, 0);
-        lv_obj_set_style_border_width(dot, 0, 0);
-        lv_obj_remove_flag(dot,
-                           LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-labels:
-        mk_label(row, &kenney12, C_MUTED, 24, 6,
-                 v->app[0] ? v->app : "APP");
-        lv_obj_t *tl = mk_label(row, &kenney16, C_WHITE, 24, 20,
-                                v->title[0] ? v->title : v->msg);
-        lv_obj_set_width(tl, 184);
-        lv_label_set_long_mode(tl, LV_LABEL_LONG_DOT);
+
+        char when[12];
+        const char *head, *prev;
+        notif_when(v, when, sizeof when);
+        notif_lines(v, &head, &prev);
+        lv_obj_t *tl = mk_label_r(row, &kenney12, C_MUTED, 206, 4, when);
+        int tx = lv_obj_get_x(tl);
+        mk_line(row, &kenney12, (v->flags & 0x01) ? C_MUTED : C_ACCENT,
+                10, 4, tx - 8 - 10, v->app);
+        mk_line(row, &kenney16, C_WHITE, 10, 19, 196, head);
+        if (prev[0])
+            mk_line(row, &kenney12, C_MUTED, 10, 39, 196, prev);
     }
 }
 
@@ -2494,6 +2822,14 @@ static void cardio_zone(int bpm, char *z, const char **name)
     *name = zn[zi];
 }
 
+/* 2.2.2 layout. 2.2.1 printed a 119 px "188" inside a 76 px hub hex,
+   with "RECOVERY" under a 36 px satellite hex on top of the number:
+     40..104  the BPM, centred, BPM / LAST under it (no hex round it)
+     108..147 two cards: zone (Z3 / AEROBIC) and resting heart rate
+     152..231 live PPG trace */
+#define CD_CARD_Y 108
+#define CD_CARD_H 40
+
 static void cardio_draw(lv_event_t *e)
 {
     lv_layer_t *layer = lv_event_get_layer(e);
@@ -2503,28 +2839,28 @@ static void cardio_draw(lv_event_t *e)
     lv_color_t hc = stale ? lv_color_hex(BPM_STALE_RGB)
                   : locked ? lv_color_hex(0xF0586E)
                            : lv_color_hex(0x38425A);
-    /* hub hex with the heart glyph; the BPM object prints inside */
-    hex_stroke(layer, 120, 92, 44, hc, 2);
-    hex_stroke(layer, 120, 92, 39, lv_color_mix(hc, lv_color_black(), 170), 1);
     if (!locked) {
-        draw_glyph(layer, G_CARDIO, 120, 92, 14, hc);
-    } else {
-        /* held reading: grey hub + number, LAST instead of BPM */
-        draw_txt_c(layer, &kenney12, lv_color_hex(0x8A94A8), 120, 118,
-                   stale ? "LAST" : "BPM");
+        /* no reading yet: the heart in its hex where the number goes */
+        hex_stroke(layer, 120, 62, 24, hc, 2);
+        draw_glyph(layer, G_CARDIO, 120, 62, 11, hc);
     }
-    /* satellites: zone left, resting right */
+    /* zone card (left) and resting card (right), text in two lines */
     char z[4];
     const char *zn;
     cardio_zone(bpm, z, &zn);
-    hex_stroke(layer, 52, 78, 21, C_ACCENT, 1);
-    draw_txt_c(layer, &kenney16, C_ACCENT, 52, 68, z);
-    draw_txt_c(layer, &kenney12, lv_color_hex(0x5A6478), 52, 86, zn);
-    hex_stroke(layer, 188, 78, 21, lv_color_hex(0xB06CF0), 1);
+    dk_oct(layer, 10, CD_CARD_Y, 106, CD_CARD_H, 7, C_ACCENT, 1,
+           LV_OPA_TRANSP);
+    draw_txt_c(layer, &kenney16, C_ACCENT, 63, CD_CARD_Y + 4, z);
+    draw_txt_c(layer, &kenney12, lv_color_hex(0x8A94A8), 63, CD_CARD_Y + 23,
+               bpm > 0 ? zn : "ZONE");
+    dk_oct(layer, 124, CD_CARD_Y, 106, CD_CARD_H, 7, lv_color_hex(0xB06CF0),
+           1, LV_OPA_TRANSP);
     char rb[8];
     lv_snprintf(rb, sizeof rb, DL.rest_bpm ? "%d" : "--", DL.rest_bpm);
-    draw_txt_c(layer, &kenney16, lv_color_hex(0xB06CF0), 188, 68, rb);
-    draw_txt_c(layer, &kenney12, lv_color_hex(0x5A6478), 188, 86, "REST");
+    draw_txt_c(layer, &kenney16, lv_color_hex(0xB06CF0), 177, CD_CARD_Y + 4,
+               rb);
+    draw_txt_c(layer, &kenney12, lv_color_hex(0x8A94A8), 177,
+               CD_CARD_Y + 23, "RESTING");
     /* grid behind the trace, the concept's ECG panel */
     lv_draw_line_dsc_t ln;
     lv_draw_line_dsc_init(&ln);
@@ -2545,7 +2881,7 @@ static void build_cardio(lv_obj_t *r)
     page_bg(r);
     mk_header(r, "CARDIO", 0);
 
-    /* one canvas for the hexes + trace grid */
+    /* one canvas for the cards, the waiting heart and the trace grid */
     cardio_art = lv_obj_create(r);
     lv_obj_set_pos(cardio_art, 0, 0);
     lv_obj_set_size(cardio_art, 240, 240);
@@ -2556,17 +2892,24 @@ static void build_cardio(lv_obj_t *r)
                        LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(cardio_art, cardio_draw, LV_EVENT_DRAW_MAIN, NULL);
 
-    /* big live BPM on top of the hub hex */
+    /* the live BPM: full-width and centred, so 72 -> 104 stays centred */
     int bpm = sensors_bpm();
+    int stale = bpm > 0 && sensors_bpm_stale();
     char buf[16];
     if (bpm > 0)
         lv_snprintf(buf, sizeof buf, "%d", bpm);
     else
         buf[0] = 0;
-    cardio_bpm = mk_label_c(r, &kenney56,
-                            lv_color_hex(bpm > 0 && sensors_bpm_stale()
-                                         ? BPM_STALE_RGB : 0xF0586E),
-                            120, 60, buf);
+    cardio_bpm = mk_label(r, &kenney56,
+                          lv_color_hex(stale ? BPM_STALE_RGB : 0xF0586E),
+                          0, 34, buf);
+    lv_obj_set_width(cardio_bpm, 240);
+    lv_obj_set_style_text_align(cardio_bpm, LV_TEXT_ALIGN_CENTER, 0);
+    if (bpm > 0)
+        mk_label_c(r, &kenney12, C_MUTED, 120, 90, stale ? "LAST" : "BPM");
+    else
+        mk_label_c(r, &kenney12, C_MUTED, 120, 90,
+                   sensors_hr_on() ? "MEASURING" : "HEART RATE OFF");
 
     /* full-width live PPG — the real optical signal, orange per concept */
     lv_obj_t *t = lv_obj_create(r);
@@ -2777,6 +3120,16 @@ void ui_tick(void)
         motor_off_at = now + 250;
         if (asleep)
             ui_wake();
+    }
+    /* its text arrived: open it, so a new notification is shown as
+       well as felt */
+    {
+        uint32_t pu = ancs_take_popup();
+        if (pu && !dnd_on) {
+            if (asleep)
+                ui_wake();
+            notif_popup_show(pu);
+        }
     }
     if (cur == SCR_NOTIF && ancs_take_dirty())
         rebuild();

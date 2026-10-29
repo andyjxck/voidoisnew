@@ -115,6 +115,18 @@ static struct tbox tb[96];
 static int ntb;
 static struct tbox shp[48];
 static int nshp;
+struct shape { int k, a, b, c, d, e; };
+static struct shape shapes[160];
+static int nshape;
+static void shape_bbox(const struct shape *s, struct tbox *b)
+{
+    b->obj = NULL; b->s[0] = 0;
+    if (s->k == 3) { b->x1 = s->a; b->y1 = s->b; b->x2 = s->c; b->y2 = s->d; }
+    else if (s->k == 1) { b->x1 = s->a; b->y1 = s->b;
+        b->x2 = s->a + s->c - 1; b->y2 = s->b + s->d - 1; }
+    else { int hw = s->c * 866 / 1000; b->x1 = s->a - hw; b->x2 = s->a + hw;
+        b->y1 = s->b - s->c; b->y2 = s->b + s->c; }
+}
 static void tb_add(int x1, int y1, int x2, int y2, const void *obj,
                    const char *s)
 {
@@ -237,7 +249,10 @@ static void occlude(lv_obj_t *o)
 {
     if (lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN))
         return;
-    if (lv_obj_get_parent(o) && lv_obj_get_style_bg_opa(o, LV_PART_MAIN) >= LV_OPA_COVER) {
+    /* wl_note paints its own opaque card in a draw callback */
+    if (lv_obj_get_parent(o) &&
+        (lv_obj_get_style_bg_opa(o, LV_PART_MAIN) >= LV_OPA_COVER ||
+         o == wl_note)) {
         lv_area_t a;
         lv_obj_get_coords(o, &a);
         struct tbox ob = {a.x1, a.y1, a.x2, a.y2, o, ""};
@@ -251,9 +266,93 @@ static void occlude(lv_obj_t *o)
             if (!ovl(&shp[i], &ob))
                 shp[k++] = shp[i];
         nshp = k;
+        k = 0;
+        for (int i = 0; i < nshape; i++) {
+            struct tbox sb;
+            shape_bbox(&shapes[i], &sb);
+            if (!ovl(&sb, &ob))
+                shapes[k++] = shapes[i];
+        }
+        nshape = k;
     }
     for (uint32_t i = 0; i < lv_obj_get_child_count(o); i++)
         occlude(lv_obj_get_child(o, i));
+}
+
+/* ---- shapes (2.2.2): every dk_oct card, dk_hex and dk_rect bar the
+   canvases draw. Text must sit wholly inside a shape (2 px clear of its
+   outline) or wholly outside it (1 px clear): text half on an outline
+   is what "RECOVERY" spilling out of its hex looked like. */
+void uisnap_shape(int k, int a, int b, int c, int d, int e)
+{
+    for (int i = 0; i < nshape; i++)
+        if (shapes[i].k == k && shapes[i].a == a && shapes[i].b == b &&
+            shapes[i].c == c && shapes[i].d == d && shapes[i].e == e)
+            return;                   /* drawn again for the next strip */
+    if (nshape < 160)
+        shapes[nshape++] = (struct shape){k, a, b, c, d, e};
+}
+
+static int poly_in(const int *px, const int *py, int n, int x, int y)
+{
+    int in = 0;
+    for (int i = 0, j = n - 1; i < n; j = i++)
+        if ((py[i] > y) != (py[j] > y) &&
+            x < (px[j] - px[i]) * (y - py[i]) / (double)(py[j] - py[i]) + px[i])
+            in = !in;
+    return in;
+}
+
+static int shape_in(const struct shape *s, int x, int y)
+{
+    if (s->k == 3)
+        return x >= s->a && x <= s->c && y >= s->b && y <= s->d;
+    if (s->k == 1) {
+        int x0 = s->a, y0 = s->b, x2 = s->a + s->c - 1, y2 = s->b + s->d - 1,
+            cut = s->e;
+        int px[8] = {x0 + cut, x2 - cut, x2, x2, x2 - cut, x0 + cut, x0, x0};
+        int py[8] = {y0, y0, y0 + cut, y2 - cut, y2, y2, y2 - cut, y0 + cut};
+        return poly_in(px, py, 8, x, y);
+    }
+    int cx = s->a, cy = s->b, r = s->c, hw = r * 866 / 1000;
+    int px[6] = {cx, cx + hw, cx + hw, cx, cx - hw, cx - hw};
+    int py[6] = {cy - r, cy - r / 2, cy + r / 2, cy + r, cy + r / 2, cy - r / 2};
+    return poly_in(px, py, 6, x, y);
+}
+
+/* pixels of the box grown by g that fall inside the shape, and the total */
+static void box_in(const struct shape *s, const struct tbox *t, int g,
+                   int *in, int *all)
+{
+    *in = *all = 0;
+    for (int y = t->y1 - g; y <= t->y2 + g; y++)
+        for (int x = t->x1 - g; x <= t->x2 + g; x++) {
+            (*all)++;
+            *in += shape_in(s, x, y);
+        }
+}
+
+static int text_straddles;
+static void shape_audit(void)
+{
+    static const char *kn[4] = {"", "card", "hex", "bar"};
+    for (int i = 0; i < ntb; i++)
+        for (int k = 0; k < nshape; k++) {
+            const struct shape *s = &shapes[k];
+            int in2, all2, in1, all1;
+            box_in(s, &tb[i], 2, &in2, &all2);
+            if (in2 == all2)
+                continue;                     /* wholly inside */
+            box_in(s, &tb[i], 1, &in1, &all1);
+            if (in1 == 0)
+                continue;                     /* wholly outside */
+            /* a small bar (icon stroke, progress fill) never holds text */
+            text_straddles++;
+            finding(1, "text \"%s\" %d,%d-%d,%d sits on the edge of a %s"
+                    " (%d,%d,%d,%d)", tb[i].s, tb[i].x1, tb[i].y1, tb[i].x2,
+                    tb[i].y2, kn[s->k], s->a, s->b, s->c, s->d);
+        }
+    finding(0, "shapes: %d", nshape);
 }
 
 static int text_overlaps;
@@ -393,6 +492,7 @@ static void shot(const char *dir, scr_t s, const char *name)
     ntgt = 0;
     ntb = 0;
     nshp = 0;
+    nshape = 0;
     cur = s;
     rebuild();
     settle();
@@ -406,6 +506,7 @@ static void shot(const char *dir, scr_t s, const char *name)
         walk(lv_layer_top(), 0);
     }
     text_audit();
+    shape_audit();
     {
         static const char *lcn[LC_N], *ccn[CCW_DEFN], *stn[16];
         for (int i = 0; i < LC_N; i++) lcn[i] = lc_apps[i].name;
@@ -472,20 +573,42 @@ int main(int argc, char **argv)
     snap_hr_on = 0; shot(dir, SCR_FACE, "03_face_hr_off");
     snap_hr_on = 1; snap_bpm = 72;
     snap_music_data.pos_ms = now_ms;
-    /* 2.1 face states: music chip, no weather, unsynced / restored clock */
-    snap_music_data.playing = 0; shot(dir, SCR_FACE, "04_face_no_music");
+    /* face states: music chip (long title, no artist, paused, gone),
+       water chip, unsynced / restored clock */
+    snap_music_data.playing = 0; snap_music_recent = 0;
+    shot(dir, SCR_FACE, "04_face_no_music");
+    snap_music_recent = 1;
+    shot(dir, SCR_FACE, "04_face_music_paused");
     snap_music_data.playing = 1;
-    snap_wx_on = 0; shot(dir, SCR_FACE, "05_face_no_weather"); snap_wx_on = 1;
+    {
+        struct music keep = snap_music_data;
+        snprintf(snap_music_data.track, sizeof snap_music_data.track, "%s", "Harder, Better, Faster, Stronger (Alive 2007 Live)");
+        snprintf(snap_music_data.artist, sizeof snap_music_data.artist, "%s", "Daft Punk and The Very Long Orchestra of Everything");
+        shot(dir, SCR_FACE, "04_face_music_long");
+        shot(dir, SCR_MUSIC, "33_music_long_title");
+        snap_music_data.artist[0] = 0; snap_music_data.album[0] = 0;
+        shot(dir, SCR_FACE, "04_face_music_no_artist");
+        shot(dir, SCR_MUSIC, "33_music_no_artist");
+        snprintf(snap_music_data.track, sizeof snap_music_data.track, "%s", "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW");
+        snprintf(snap_music_data.artist, sizeof snap_music_data.artist, "%s", "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW");
+        snap_music_data.len_s = 5999; snap_music_data.pos_s = 5998;
+        shot(dir, SCR_MUSIC, "33_music_widest");
+        snap_music_data.playing = 0;
+        shot(dir, SCR_FACE, "04_face_music_widest_paused");
+        snap_music_data = keep;
+        snap_music_data.track[0] = snap_music_data.artist[0] = 0;
+        snap_music_data.album[0] = 0; snap_music_data.playing = 0;
+        snap_music_data.len_s = 0;
+        shot(dir, SCR_MUSIC, "34_music_stopped");
+        snap_music_data = keep;
+    }
+    DL.water_ml = 1250; shot(dir, SCR_FACE, "05_face_water_1250");
+    DL.water_ml = 10000; shot(dir, SCR_FACE, "05_face_water_max");
+    DL.water_ml = 0;
     snap_synced = 0; snap_restored = 1;
     shot(dir, SCR_FACE, "06_face_clock_restored");
     snap_restored = 0; shot(dir, SCR_FACE, "07_face_clock_unset");
     snap_synced = 1;
-    snap_wx_data.rx_ms = now_ms - 12 * 60000;
-    shot(dir, SCR_WEATHER, "30_weather");
-    snap_wx_data.ndays = 0; shot(dir, SCR_WEATHER, "31_weather_no_forecast");
-    snap_wx_data.ndays = 5;
-    snap_wx_on = 0; shot(dir, SCR_WEATHER, "32_weather_placeholder");
-    snap_wx_on = 1;
     snap_music_data.pos_ms = now_ms;
     shot(dir, SCR_MUSIC, "33_music_playing");
     snap_music_data.playing = 0; shot(dir, SCR_MUSIC, "34_music_paused");
@@ -524,7 +647,12 @@ int main(int argc, char **argv)
     s_in_bed = 1; s_start_ms = now_ms - (6u * 3600000u + 25u * 60000u);
     shot(dir, SCR_SLEEP, "15_sleep_in_bed"); s_in_bed = 0;
     shot(dir, SCR_S_DONE, "16_s_done");
-    water_ml = 750; shot(dir, SCR_WATER, "17_water");
+    DL.water_ml = 750; shot(dir, SCR_WATER, "17_water_no_yesterday");
+    DL.y_day = 20261027; DL.y_water = 2250;
+    DL.y_steps = 11234; DL.y_rest = 58;
+    shot(dir, SCR_WATER, "17_water");
+    DL.water_ml = 10000; shot(dir, SCR_WATER, "17_water_max");
+    DL.water_ml = 750;
     clock_tab = 0; shot(dir, SCR_CLOCK, "18_clock_sw");
     sw_running = 1; sw_t0 = now_ms - 83400; sw_acc = 0;
     shot(dir, SCR_CLOCK, "18_clock_sw_running"); sw_running = 0; sw_t0 = 0;
@@ -543,12 +671,47 @@ int main(int argc, char **argv)
     shot(dir, SCR_SETTIME, "23_settime");
     shot(dir, SCR_NOTIF, "24_notif");
     notif_sel_uid = 100; shot(dir, SCR_NOTIF, "25_notif_open");
-    /* worst case the phone can send: 4 notifications, every field full */
-    snap_notif_stress = 1; notif_sel_uid = 0;
-    shot(dir, SCR_NOTIF, "24_notif_full");
-    notif_sel_uid = 200; shot(dir, SCR_NOTIF, "25_notif_open_long");
+    notif_reply = 1; shot(dir, SCR_NOTIF, "25_notif_reply_confirm");
+    notif_reply = 0;
+    notif_sel_uid = 102; shot(dir, SCR_NOTIF, "25_notif_open_no_reply");
+    /* worst case the phone can send: 6 notifications, every field full */
+    snap_notif_stress = 1; notif_sel_uid = 0; notif_lpage = 0;
+    shot(dir, SCR_NOTIF, "24_notif_full_p1");
+    notif_lpage = 1; shot(dir, SCR_NOTIF, "24_notif_full_p2");
+    notif_lpage = 0;
+    for (int u = 200; u < 206; u++) {
+        char nm[40];
+        notif_sel_uid = u;
+        for (notif_dpage = 0; notif_dpage < 4; notif_dpage++) {
+            snprintf(nm, sizeof nm, "25_notif_long_%d_p%d", u - 199,
+                     notif_dpage + 1);
+            shot(dir, SCR_NOTIF, nm);
+            if (notif_dpage + 1 >= notif_dpages)
+                break;
+        }
+        notif_dpage = 0;
+    }
     notif_sel_uid = 0; snap_notif_stress = 0;
+    snap_notif_none = 1; shot(dir, SCR_NOTIF, "24_notif_empty");
+    snap_notif_none = 0;
+    /* a notification arriving pops up over the face */
+    shot(dir, SCR_FACE, "00_face_before_popup");
+    notif_popup_show(101);
+    shot(dir, cur, "24_notif_popup");
+    finding(cur == SCR_NOTIF && notif_sel_uid == 101 ? 0 : 1,
+            "new notification opens its detail (screen %d uid %u)", cur,
+            (unsigned)notif_sel_uid);
+    notif_close();
+    finding(cur == SCR_FACE ? 0 : 1, "back from the pop-up returns to the face");
     notif_sel_uid = 0;
+    for (int bp = 0; bp < 6; bp++) {
+        static const int bpms[6] = {0, 62, 104, 128, 147, 188};
+        char nm[32];
+        snap_bpm = bpms[bp];
+        snprintf(nm, sizeof nm, "26_cardio_%d", bpms[bp]);
+        shot(dir, SCR_CARDIO, nm);
+    }
+    snap_bpm = 72;
     shot(dir, SCR_CARDIO, "26_cardio");
     snap_stale = 1; shot(dir, SCR_CARDIO, "26_cardio_bpm_held");
     shot(dir, SCR_STATS, "22_stats_bpm_held"); snap_stale = 0;
