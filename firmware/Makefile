@@ -21,7 +21,7 @@ DEPFLAGS = -MMD -MP
 LDFLAGS = $(ARCH) -T link.ld -Wl,--gc-sections -Wl,-Map=voidos-app.map \
           -specs=nano.specs -Wl,--no-warn-rwx-segments
 
-VERSION ?= 2.2.1
+VERSION ?= 2.2.2
 BIN      = voidos-app.bin
 IMG      = voidos-app-image.bin
 ZIP      = voidos-dfu-$(VERSION).zip
