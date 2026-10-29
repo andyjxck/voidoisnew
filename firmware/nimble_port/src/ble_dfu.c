@@ -40,10 +40,9 @@ static const ble_uuid128_t diag_uuid = BLE_UUID128_INIT(
 static const ble_uuid128_t diag2_uuid = BLE_UUID128_INIT(
     0x77, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
     0x88, 0x99, 0xAA, 0xBB, 0x00, 0x00, 0x00, 0x01);
-/* standard Current Time Service: phones (Gadgetbridge, nRF Connect)
-   write 0x2A2B on connect — that's how the face gets real time */
-static const ble_uuid16_t cts_svc_uuid = BLE_UUID16_INIT(0x1805);
-static const ble_uuid16_t cts_ct_uuid  = BLE_UUID16_INIT(0x2A2B);
+/* 2.2.2: the Current Time Service lives in ble_svcs.c only. This file
+   used to register a second 0x1805, so a phone saw two CTS services and
+   InfiniLink kept whichever 0x2A2B it discovered last. */
 
 static int dfu_state;
 static int flash_ready;
@@ -301,41 +300,6 @@ static int diag_put(struct os_mbuf *om, const char *s, int n)
 }
 
 /* touch state: "CID|F|raw|reads|errors"  (~24 bytes) */
-static uint16_t h_cts;
-
-/* Current Time char: 10 bytes — year le16, mon, day, h, m, s, dow,
-   frac256, adjust-reason. Write = phone syncing us; read = current. */
-static int cts_access(uint16_t conn, uint16_t attr,
-                      struct ble_gatt_access_ctxt *ctxt, void *arg)
-{
-    (void)conn; (void)attr; (void)arg;
-    extern void hal_clock_set(int, int, int, int, int, int, int);
-    extern int hal_clock_hour(void), hal_clock_minute(void),
-               hal_clock_second(void);
-    extern void hal_clock_date(int *, int *, int *, int *);
-    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
-        uint8_t t[10];
-        if (os_mbuf_copydata(ctxt->om, 0, sizeof t, t) != 0)
-            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-        hal_clock_set(t[0] | (t[1] << 8), t[2], t[3], t[7],
-                      t[4], t[5], t[6]);
-        return 0;
-    }
-    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        int y, mo, d, dow;
-        uint8_t t[10];
-        hal_clock_date(&y, &mo, &d, &dow);
-        t[0] = (uint8_t)y; t[1] = (uint8_t)(y >> 8);
-        t[2] = (uint8_t)mo; t[3] = (uint8_t)d;
-        t[4] = (uint8_t)hal_clock_hour();
-        t[5] = (uint8_t)hal_clock_minute();
-        t[6] = (uint8_t)hal_clock_second();
-        t[7] = (uint8_t)dow; t[8] = 0; t[9] = 0;
-        return os_mbuf_append(ctxt->om, t, sizeof t)
-                   ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;
-    }
-    return 0;
-}
 
 static int diag_read(struct os_mbuf *om)
 {
@@ -415,19 +379,10 @@ static const struct ble_gatt_chr_def dfu_chrs[] = {
      .flags = BLE_GATT_CHR_F_READ, .val_handle = &h_diag2},
     {0},
 };
-static const struct ble_gatt_chr_def cts_chrs[] = {
-    {.uuid = &cts_ct_uuid.u, .access_cb = cts_access,
-     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE |
-              BLE_GATT_CHR_F_NOTIFY,
-     .val_handle = &h_cts},
-    {0},
-};
 
 static const struct ble_gatt_svc_def dfu_svcs[] = {
     {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &dfu_svc_uuid.u,
      .characteristics = dfu_chrs},
-    {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &cts_svc_uuid.u,
-     .characteristics = cts_chrs},
     {0},
 };
 

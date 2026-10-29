@@ -8,6 +8,7 @@
 #include "board.h"
 #include "ui_deco.h"
 #include "phone.h"
+#include "daily.h"
 
 #if defined(VOIDOS_DEVICE) && __has_include("gen/version.h")
 #include "gen/version.h"         /* generated from the Makefile's VERSION */
@@ -43,7 +44,7 @@ extern const lv_font_t kenney9, kenney12, kenney16, kenney24, kenney56;
 typedef enum {
     SCR_FACE, SCR_LAUNCHER, SCR_CC, SCR_WORKOUT, SCR_W_RUN, SCR_W_DONE,
     SCR_SLEEP, SCR_S_DONE, SCR_WATER, SCR_CLOCK, SCR_SETTINGS, SCR_STATS,
-    SCR_SETTIME, SCR_NOTIF, SCR_CARDIO, SCR_DIAG, SCR_WEATHER, SCR_MUSIC
+    SCR_SETTIME, SCR_NOTIF, SCR_CARDIO, SCR_DIAG, SCR_MUSIC
 } scr_t;
 
 static scr_t cur = SCR_FACE;
@@ -79,7 +80,6 @@ static int s_track = 1, s_in_bed;
 static uint32_t s_start_ms, s_last_ms;
 
 /* water */
-static int water_ml;
 
 /* clock: 0 stopwatch, 1 timer, 2 alarm */
 static int clock_tab;
@@ -87,7 +87,6 @@ static int sw_running;
 static uint32_t sw_t0, sw_acc;
 static uint32_t timer_end_ms;
 static int timer_done;
-static int resting_bpm;         /* lowest BPM seen this session */
 static int alarm_on = 1;
 static int alarm_h = 7, alarm_m = 0;
 static int alarm_ringing;
@@ -142,7 +141,7 @@ struct persist {
     uint32_t magic;              /* 0x564F4944 = "VOID" */
     uint8_t ver;
     uint8_t brightness, dnd, airplane, water_lock, bt_on;
-    uint8_t cc_hide, water_ml, alarm_on;
+    uint8_t cc_hide, water_q, alarm_on;   /* water_q: 250 ml units (<=2.2.1) */
     uint32_t steps_total, chip_at_save;
     uint8_t alarm_h, alarm_m;
     uint16_t last_sleep_min, last_workout_min;
@@ -156,8 +155,36 @@ struct persist {
     uint8_t face_dig;
     uint8_t hr_on;
     uint8_t compat;              /* 2.1: advertise as InfiniTime */
+    /* 2.2.2 (ver 6): the day the daily counters belong to, the
+       counters, and the last finished day's totals */
+    struct daily dl;
+    uint32_t sleep_day;          /* yyyymmdd the last sleep ended */
 };
 static struct persist P;
+/* live daily counters: water, resting HR, today's step base */
+static struct daily DL;
+static uint32_t sleep_day;
+static uint32_t today_key(void);
+
+int ui_water_ml(void) { return DL.water_ml; }
+
+/* today's local date as yyyymmdd, 0 while the clock is unknown */
+static uint32_t today_key(void)
+{
+    if (!hal_clock_synced() && !hal_clock_restored())
+        return 0;
+    int y, mo, d, dow;
+    hal_clock_date(&y, &mo, &d, &dow);
+    return daily_key(y, mo, d);
+}
+
+int ui_steps(void);
+/* steps since local midnight (daily.h owns the day boundary) */
+int ui_steps_today(void)
+{
+    int l = ui_steps();
+    return l < 0 ? -1 : (int)daily_steps(&DL, l);
+}
 
 int ui_steps(void)
 {
@@ -185,14 +212,16 @@ static void persist_save(void)
 {
     persist_dirty = 0;
     P.magic = 0x564F4944u;
-    P.ver = 5;
+    P.ver = 6;
+    P.dl = DL;
+    P.sleep_day = sleep_day;
     P.brightness = (uint8_t)brightness;
     P.dnd = (uint8_t)dnd_on;
     P.airplane = (uint8_t)airplane_on;
     P.water_lock = (uint8_t)water_lock;
     P.bt_on = (uint8_t)bt_on;
     P.cc_hide = (uint8_t)cc_hide;
-    P.water_ml = (uint8_t)(water_ml / 250);
+    P.water_q = (uint8_t)(DL.water_ml / 250);
     P.alarm_on = (uint8_t)alarm_on;
     P.alarm_h = (uint8_t)alarm_h;
     P.alarm_m = (uint8_t)alarm_m;
@@ -231,10 +260,23 @@ static void persist_load(void)
        as 0 = "heart rate off". 1.6.x then re-saved it as ver 4 with
        hr_on = 0, which is why the face showed "--" for good. Only a
        ver 5 record (written by this build) is trusted for hr_on. */
-    if (P.magic != 0x564F4944u || P.ver < 3 || P.ver > 5) {
+    if (P.magic != 0x564F4944u || P.ver < 3 || P.ver > 6) {
         memset(&P, 0, sizeof P);
+        ble_set_compat(1);       /* 2.2.2: InfiniLink-visible by default */
         return;
     }
+    if (P.ver < 6) {
+        /* a 2.2.1 record ends at `compat`: the 2.2.2 fields are flash
+           leftovers. Keep its water (it is today's, most likely) and let
+           the first clock check adopt today's date without wiping. */
+        memset(&P.dl, 0, sizeof P.dl);
+        P.dl.water_ml = (uint16_t)(P.water_q * 250);
+        P.sleep_day = 0;
+    }
+    DL = P.dl;
+    if (DL.water_ml > 10000)
+        DL.water_ml = 0;
+    sleep_day = P.sleep_day;
     brightness = P.brightness;
     dnd_on = P.dnd;
     airplane_on = P.airplane;
@@ -242,7 +284,6 @@ static void persist_load(void)
     water_lock = 0;
     bt_on = P.bt_on;
     cc_hide = P.cc_hide;
-    water_ml = P.water_ml * 250;
     alarm_on = P.alarm_on;
     if (P.alarm_h < 24 && P.alarm_m < 60) {
         alarm_h = P.alarm_h;
@@ -253,7 +294,9 @@ static void persist_load(void)
     w_last_sets = P.last_workout_sets;
     s_track = P.s_track;
     face_dig = P.face_dig;
-    ble_set_compat(P.ver >= 5 && P.compat == 1);
+    /* 2.2.2 turns InfiniLink mode on for everyone once; a later
+       choice in Settings (a ver 6 record) is kept */
+    ble_set_compat(P.ver >= 6 ? P.compat == 1 : 1);
     if (P.ver >= 5 && P.hr_on <= 1)
         sensors_hr_set(P.hr_on);
     else
@@ -683,7 +726,7 @@ enum {
     G_WORKOUT, G_CARDIO, G_STATS, G_SLEEP, G_WATER, G_CLOCK,
     G_ALERTS, G_SETTINGS, G_DIAG, G_PHONE,
     G_BATT, G_SUN, G_BT, G_PLANE, G_TORCH, G_STEPS, G_BOLT,
-    G_WEATHER, G_MUSIC
+    G_MUSIC
 };
 static void hex_stroke(lv_layer_t *layer, int cx, int cy, int r,
                        lv_color_t c, int w);
@@ -999,9 +1042,6 @@ static void draw_glyph(lv_layer_t *layer, int g, int cx, int cy, int s,
     rc.bg_opa = LV_OPA_COVER;
     rc.bg_color = c;
     switch (g) {
-    case G_WEATHER:                        /* sun behind a cloud */
-        dk_wx_icon(layer, 1, cx, cy, s, c);
-        break;
     case G_MUSIC:
         dk_music(layer, DK_M_NOTE, cx, cy, s, c);
         break;
@@ -1312,7 +1352,7 @@ static void build_cc(lv_obj_t *r)
    hex node joined to the hub by a thin trace. Drag sideways to move
    focus; tap the hub or any node to open that app. One canvas draws
    everything; input runs on the canvas object. */
-#define LC_N 9
+#define LC_N 8
 static const struct {
     const char *name;
     scr_t scr;
@@ -1325,7 +1365,6 @@ static const struct {
     {"SLEEP",    SCR_SLEEP,    G_SLEEP,    LV_COLOR_MAKE(0xB0, 0x6C, 0xF0)},
     {"WATER",    SCR_WATER,    G_WATER,    LV_COLOR_MAKE(0x40, 0xB0, 0xF0)},
     {"CLOCK",    SCR_CLOCK,    G_CLOCK,    LV_COLOR_MAKE(0xF0, 0xD0, 0x40)},
-    {"WEATHER",  SCR_WEATHER,  G_WEATHER,  LV_COLOR_MAKE(0x46, 0xD8, 0xE0)},
     {"ALERTS",   SCR_NOTIF,    G_ALERTS,   LV_COLOR_MAKE(0x50, 0xE0, 0x78)},
     {"SETTINGS", SCR_SETTINGS, G_SETTINGS, LV_COLOR_MAKE(0x8A, 0x94, 0xA8)},
 };
@@ -1625,6 +1664,7 @@ static void sleep_cb(lv_event_t *e)
     if (s_in_bed) {
         s_last_ms = hal_millis() - s_start_ms;
         s_in_bed = 0;
+        sleep_day = today_key();
         persist_mark();
         nav_sp = 0;
         nav_to(SCR_S_DONE);
@@ -1675,11 +1715,9 @@ static void build_s_done(lv_obj_t *r)
 
 static void water_cb(lv_event_t *e)
 {
-    water_ml += (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
-    if (water_ml < 0)
-        water_ml = 0;
-    if (water_ml > 10000)
-        water_ml = 10000;
+    int w = DL.water_ml +
+            (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    DL.water_ml = (uint16_t)(w < 0 ? 0 : w > 10000 ? 10000 : w);
     persist_mark();
     rebuild();
 }
@@ -1690,7 +1728,7 @@ static void build_water(lv_obj_t *r)
     mk_header(r, "WATER", 1);
     mk_card(r, 20, 70, 200, 94, C_FILL);
     char buf[24];
-    lv_snprintf(buf, sizeof buf, "%d ML", water_ml);
+    lv_snprintf(buf, sizeof buf, "%d ML", DL.water_ml);
     mk_label_c(r, &kenney24, C_ACCENT, 120, 82, buf);
     mk_label_c(r, &kenney12, C_MUTED, 120, 118, "GOAL 2000 ML");
     lv_obj_t *bar = lv_bar_create(r);
@@ -1698,7 +1736,7 @@ static void build_water(lv_obj_t *r)
     lv_obj_set_size(bar, 180, 16);
     lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);   /* display only */
     lv_bar_set_range(bar, 0, 2000);
-    lv_bar_set_value(bar, water_ml > 2000 ? 2000 : water_ml, LV_ANIM_OFF);
+    lv_bar_set_value(bar, DL.water_ml > 2000 ? 2000 : DL.water_ml, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(bar, C_EDGE, LV_PART_MAIN);
     lv_obj_set_style_bg_color(bar, C_ACCENT, LV_PART_INDICATOR);
     lv_obj_set_style_radius(bar, 0, LV_PART_MAIN);
@@ -2062,7 +2100,7 @@ static int st_dx, st_drag;
 
 static void st_value(int i, char *v, char *u)
 {
-    int steps = ui_steps();
+    int steps = ui_steps_today();
     int bpm = sensors_bpm();
     switch (i) {
     case 0:
@@ -2077,10 +2115,10 @@ static void st_value(int i, char *v, char *u)
                                  : sensors_bpm_stale() ? "LAST BPM" : "BPM");
         break;
     case 2:
-        lv_snprintf(v, 16, "%s", resting_bpm ? "" : "--");
-        if (resting_bpm)
-            lv_snprintf(v, 16, "%d", resting_bpm);
-        lv_snprintf(u, 12, "%s", resting_bpm ? "BPM" : "LEARNING");
+        lv_snprintf(v, 16, "%s", DL.rest_bpm ? "" : "--");
+        if (DL.rest_bpm)
+            lv_snprintf(v, 16, "%d", DL.rest_bpm);
+        lv_snprintf(u, 12, "%s", DL.rest_bpm ? "BPM" : "LEARNING");
         break;
     case 3:
         lv_snprintf(v, 16, "%d", steps > 0 ? steps * 4 / 100 : 0);
@@ -2100,7 +2138,7 @@ static void st_value(int i, char *v, char *u)
         }
         break;
     case 5:
-        lv_snprintf(v, 16, "%d", water_ml);
+        lv_snprintf(v, 16, "%d", DL.water_ml);
         lv_snprintf(u, 12, "ML TODAY");
         break;
     }
@@ -2484,7 +2522,7 @@ static void cardio_draw(lv_event_t *e)
     draw_txt_c(layer, &kenney12, lv_color_hex(0x5A6478), 52, 86, zn);
     hex_stroke(layer, 188, 78, 21, lv_color_hex(0xB06CF0), 1);
     char rb[8];
-    lv_snprintf(rb, sizeof rb, resting_bpm ? "%d" : "--", resting_bpm);
+    lv_snprintf(rb, sizeof rb, DL.rest_bpm ? "%d" : "--", DL.rest_bpm);
     draw_txt_c(layer, &kenney16, lv_color_hex(0xB06CF0), 188, 68, rb);
     draw_txt_c(layer, &kenney12, lv_color_hex(0x5A6478), 188, 86, "REST");
     /* grid behind the trace, the concept's ECG panel */
@@ -2642,7 +2680,6 @@ static void rebuild(void)
     case SCR_NOTIF:     build_notif(root); break;
     case SCR_CARDIO:    build_cardio(root); break;
     case SCR_DIAG:      build_diag(root); break;
-    case SCR_WEATHER:   build_weather(root); break;
     case SCR_MUSIC:     build_music(root); break;
     }
 }
@@ -2747,8 +2784,24 @@ void ui_tick(void)
     {
         int b = sensors_bpm();
         if (b > 0 && !sensors_bpm_stale() && !w_active &&
-            (resting_bpm == 0 || b < resting_bpm))
-            resting_bpm = b;
+            (DL.rest_bpm == 0 || b < DL.rest_bpm))
+            DL.rest_bpm = b;
+    }
+    /* 2.2.2 daily reset: once a second, compare the local date with the
+       day the counters belong to (daily.h). Runs asleep too, so the roll
+       happens at midnight; after power-off it happens on the first check
+       once the clock is back (restored, then corrected by the phone). */
+    {
+        static uint32_t day_chk;
+        if (now - day_chk >= 1000 || !day_chk) {
+            day_chk = now ? now : 1;
+            if (daily_roll(&DL, today_key(), hal_clock_synced(), ui_steps())) {
+                persist_save();
+                if (cur == SCR_FACE || cur == SCR_STATS || cur == SCR_WATER ||
+                    cur == SCR_CARDIO)
+                    rebuild();
+            }
+        }
     }
     /* alarm: once per matching minute, buzz in 500 ms pulses until STOP */
     /* a restored clock rings too: a late alarm beats a missed one */
@@ -2779,10 +2832,6 @@ void ui_tick(void)
         break;
     case SCR_MUSIC:
         music_tick();
-        break;
-    case SCR_WEATHER:
-        if (phone_take_dirty())
-            rebuild();
         break;
     case SCR_LAUNCHER:
         lc_tick();

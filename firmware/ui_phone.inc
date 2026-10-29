@@ -1,7 +1,5 @@
 /* 2.1 phone-fed screens and overlays, #included by ui_nav.c (so the host
    renderer in tests/uisnap builds them exactly like the firmware):
-   - weather (InfiniTime SimpleWeatherService data from InfiniLink or
-     Gadgetbridge), with a how-to placeholder when there is none
    - music (InfiniTime music service or iOS AMS), entered only while
      music plays and the phone is linked
    - torch: a full-white layer over everything, tap to turn off
@@ -85,112 +83,6 @@ void ui_music_ascii(char *dst, const char *src, int cap)
     dst[n] = 0;
 }
 
-/* ---- weather -------------------------------------------------------------- */
-
-static int wx_c(int centi) /* centi-degrees -> rounded whole degrees */
-{
-    return centi >= 0 ? (centi + 50) / 100 : -((-centi + 50) / 100);
-}
-
-static void wx_draw(lv_event_t *e)
-{
-    lv_layer_t *l = lv_event_get_layer(e);
-    const struct wx *w = wx_get();
-    if (!w) {
-        dk_hex(l, 120, 82, 30, DK_DIM, 2);
-        dk_wx_icon(l, 2, 120, 84, 16, DK_GREY);
-        dk_oct(l, 12, 132, 216, 96, 8, DK_DIM, 1, LV_OPA_TRANSP);
-        return;
-    }
-    /* hero: icon in a cyan hex, temperature card beside it */
-    dk_hex(l, 58, 84, 38, DK_CYAN, 2);
-    dk_hex(l, 58, 84, 32, DK_DIM, 1);
-    dk_wx_icon(l, w->icon, 58, 82, 18, lv_color_white());
-    dk_oct(l, 104, 46, 124, 76, 8, DK_CYAN, 2, LV_OPA_TRANSP);
-    /* forecast strip: one chamfered pill per day */
-    int n = w->ndays;
-    if (n > 5)
-        n = 5;
-    if (n) {
-        int cw = 216 / n;
-        for (int i = 0; i < n; i++) {
-            int x = 12 + i * cw;
-            dk_oct(l, x + 2, 140, cw - 4, 92, 6,
-                   i == 0 ? DK_CYAN : DK_DIM, 1, LV_OPA_TRANSP);
-            dk_wx_icon(l, w->day[i].icon, x + cw / 2, 178, 9,
-                       lv_color_white());
-        }
-    } else {
-        dk_oct(l, 12, 140, 216, 92, 8, DK_DIM, 1, LV_OPA_TRANSP);
-    }
-}
-
-static void build_weather(lv_obj_t *r)
-{
-    page_bg(r);
-    mk_art(r, wx_draw);
-    mk_header(r, "WEATHER", 1);
-    const struct wx *w = wx_get();
-    char b[40];
-    if (!w) {
-        mk_label_c(r, &kenney16, C_WHITE, 120, 140, "NO WEATHER YET");
-        mk_label_c(r, &kenney12, C_MUTED, 120, 164, "SETTINGS > INFINILINK ON");
-        mk_label_c(r, &kenney12, C_MUTED, 120, 182, "THEN OPEN INFINILINK");
-        mk_label_c(r, &kenney12, C_MUTED, 120, 200, "OR GADGETBRIDGE");
-        return;
-    }
-    lv_snprintf(b, sizeof b, "%d", wx_c(w->temp));
-    lv_obj_t *t = mk_label_c(r, &kenney24, C_WHITE, 160, 52, b);
-    lv_snprintf(b, sizeof b, "%s C", lv_label_get_text(t));
-    lv_label_set_text(t, b);
-    lv_obj_update_layout(t);
-    lv_obj_set_x(t, 166 - lv_obj_get_width(t) / 2);
-    lv_snprintf(b, sizeof b, "L %d  H %d", wx_c(w->tmin), wx_c(w->tmax));
-    mk_label_c(r, &kenney12, C_ACCENT, 166, 82, b);
-    mk_label_c(r, &kenney12, C_MUTED, 166, 101, wx_name(w->icon));
-    if (w->city[0]) {
-        char c[34];
-        ui_music_ascii(c, w->city, sizeof c);
-        lv_obj_t *cl = mk_label(r, &kenney12, C_MUTED, 12, 124, c);
-        lv_label_set_long_mode(cl, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(cl, 120);
-    }
-    uint32_t age = (hal_millis() - w->rx_ms) / 60000u;
-    if (age < 1)
-        lv_snprintf(b, sizeof b, "NOW");
-    else if (age < 120)
-        lv_snprintf(b, sizeof b, "%u MIN AGO", (unsigned)age);
-    else
-        lv_snprintf(b, sizeof b, "%u H AGO", (unsigned)(age / 60));
-    lv_obj_t *al = mk_label(r, &kenney12, C_MUTED, 0, 124, b);
-    lv_obj_update_layout(al);
-    lv_obj_set_x(al, 228 - lv_obj_get_width(al));
-    int n = w->ndays > 5 ? 5 : w->ndays;
-    if (!n) {
-        mk_label_c(r, &kenney12, C_MUTED, 120, 178, "NO FORECAST SENT");
-        return;
-    }
-    int cw = 216 / n;
-    int y, mo, d, dow = 0;
-    if (hal_clock_synced() || hal_clock_restored())
-        hal_clock_date(&y, &mo, &d, &dow);
-    static const char *dn[8] = {"", "MON", "TUE", "WED", "THU", "FRI",
-                                "SAT", "SUN"};
-    for (int i = 0; i < n; i++) {
-        int cx = 12 + i * cw + cw / 2;
-        if (dow >= 1 && dow <= 7)
-            lv_snprintf(b, sizeof b, "%s", dn[(dow - 1 + i) % 7 + 1]);
-        else if (i == 0)
-            lv_snprintf(b, sizeof b, "NOW");
-        else
-            lv_snprintf(b, sizeof b, "+%d", i);
-        mk_label_c(r, &kenney12, i == 0 ? C_ACCENT : C_MUTED, cx, 148, b);
-        lv_snprintf(b, sizeof b, "%d", wx_c(w->day[i].tmax));
-        mk_label_c(r, &kenney16, C_WHITE, cx, 194, b);
-        lv_snprintf(b, sizeof b, "%d", wx_c(w->day[i].tmin));
-        mk_label_c(r, &kenney12, C_MUTED, cx, 213, b);
-    }
-}
 
 /* ---- music ---------------------------------------------------------------- */
 
@@ -314,13 +206,13 @@ static void music_tick(void)
     }
 }
 
-/* face chips: 1 weather, 2 music */
+/* face chips: 1 water, 2 music */
 void ui_nav_open(int which)
 {
     if (water_lock)
         return;
     if (which == 1)
-        nav_to(SCR_WEATHER);
+        nav_to(SCR_WATER);
     else if (which == 2 && music_active())
         nav_to(SCR_MUSIC);
 }

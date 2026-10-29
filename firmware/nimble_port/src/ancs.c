@@ -33,21 +33,9 @@ static const ble_uuid128_t uuid_ds = BLE_UUID128_INIT(
     0xfb, 0x7b, 0x7c, 0xce, 0x6a, 0xb3, 0x44, 0xbe,
     0xb5, 0x4b, 0xd6, 0x24, 0xe9, 0xc6, 0xea, 0x22);
 
-/* notification store shown on the NOTIF screen */
-#define ANCS_MAX_NOTIFS 4
-struct ancs_notif {
-    uint32_t uid;
-    uint8_t flags;          /* ANCS event flags (silent/important/…) */
-    uint8_t has_pos, has_neg;
-    uint32_t rx_ms;
-    char app[20];
-    char title[48];
-    char msg[96];
-};
-static struct ancs_notif notifs[ANCS_MAX_NOTIFS];
-static int notif_count;
-static int new_notif;       /* set on arrival, UI consumes for the buzz */
-static int notif_dirty;     /* set whenever the list changed */
+/* notification store shown on the NOTIF screen (ancs_store.h) */
+#include "ancs_store.h"
+static struct an_store ns;
 
 enum { ST_IDLE, ST_SVC, ST_CHR, ST_DSC, ST_SUB_NS, ST_SUB_DS, ST_LIVE };
 static int state;
@@ -65,60 +53,35 @@ static uint32_t cts_retry_at;
 static uint8_t seq_phase, seq_started;  /* see link sequencer below */
 
 /* Data Source responses can fragment across notifications; accumulate */
-static uint8_t ds_buf[320];
+static uint8_t ds_buf[400];
 static int ds_len;
-static uint32_t pending_uid;
 
 int ancs_ready(void)     { return state == ST_LIVE; }
 int ancs_state(void)     { return state; }
-int ancs_count(void)     { return notif_count; }
-int ancs_take_dirty(void){ int d = notif_dirty; notif_dirty = 0; return d; }
-int ancs_take_new(void)  { int d = new_notif; new_notif = 0; return d; }
+int ancs_count(void)     { return an_count(&ns); }
+int ancs_take_dirty(void){ int d = ns.dirty; ns.dirty = 0; return d; }
+int ancs_take_new(void)  { int d = ns.buzz; ns.buzz = 0; return d; }
+uint32_t ancs_take_popup(void) { uint32_t u = ns.popup; ns.popup = 0; return u; }
 
-struct ancs_notif_view {
-    uint32_t uid; uint8_t flags; uint8_t has_pos, has_neg;
-    const char *app, *title, *msg; uint32_t rx_ms;
-};
-static struct ancs_notif_view ancs_view;
 const struct ancs_notif_view *ancs_get(int i)
 {
-    if (i < 0 || i >= notif_count)
+    static struct ancs_notif_view v;
+    const struct an_slot *n = an_at(&ns, i);
+    if (!n)
         return NULL;
-    struct ancs_notif *n = &notifs[i];
-    ancs_view.uid = n->uid;
-    ancs_view.flags = n->flags;
-    ancs_view.has_pos = n->has_pos;
-    ancs_view.has_neg = n->has_neg;
-    ancs_view.app = n->app;
-    ancs_view.title = n->title;
-    ancs_view.msg = n->msg;
-    ancs_view.rx_ms = n->rx_ms;
-    return &ancs_view;
-}
-
-static struct ancs_notif *slot_for(uint32_t uid)
-{
-    for (int i = 0; i < notif_count; i++)
-        if (notifs[i].uid == uid)
-            return &notifs[i];
-    if (notif_count < ANCS_MAX_NOTIFS)
-        return &notifs[notif_count++];
-    /* drop the oldest */
-    memmove(notifs, notifs + 1, sizeof notifs[0] * (ANCS_MAX_NOTIFS - 1));
-    return &notifs[ANCS_MAX_NOTIFS - 1];
-}
-
-static void slot_drop(uint32_t uid)
-{
-    for (int i = 0; i < notif_count; i++) {
-        if (notifs[i].uid == uid) {
-            memmove(&notifs[i], &notifs[i + 1],
-                    sizeof notifs[0] * (notif_count - i - 1));
-            notif_count--;
-            notif_dirty = 1;
-            return;
-        }
-    }
+    v.uid = n->uid;
+    v.flags = n->flags;
+    v.has_pos = n->has_pos;
+    v.has_neg = n->has_neg;
+    v.cat = n->cat;
+    v.app = n->app[0] ? n->app : "iPhone";
+    v.title = n->title;
+    v.sub = n->sub;
+    v.msg = n->msg;
+    v.rx_ms = n->rx_ms;
+    v.date = n->date;
+    v.mod = n->mod;
+    return &v;
 }
 
 /* ---- one GATT client procedure at a time -------------------------------
@@ -181,58 +144,19 @@ static void cp_pump(void)
 }
 
 /* attribute fetches: one outstanding (the Data Source reply is
-   reassembled into one buffer), the rest wait their turn */
-#define FQ_N 6
-static uint32_t fq[FQ_N];
-static uint8_t fq_n;
-static uint32_t fetch_at;           /* current fetch sent at, 0 = none */
-
-static void fetch_send(uint32_t uid)
-{
-    /* ANCS: AppIdentifier has no length; Title/Subtitle/Message must
-       carry a max length. 2.2.0 asked for Subtitle with no length, so
-       the request was malformed from that byte on. */
-    uint8_t req[14];
-    int n = 0;
-    req[n++] = 0x00;                 /* GetNotificationAttributes */
-    req[n++] = uid & 0xFF;
-    req[n++] = (uid >> 8) & 0xFF;
-    req[n++] = (uid >> 16) & 0xFF;
-    req[n++] = (uid >> 24) & 0xFF;
-    req[n++] = 0x00;                 /* AppIdentifier */
-    req[n++] = 0x01;                 /* Title, max 48 */
-    req[n++] = 48; req[n++] = 0x00;
-    req[n++] = 0x03;                 /* Message, max 95 */
-    req[n++] = 95; req[n++] = 0x00;
-    req[n++] = 0x06;                 /* PositiveActionLabel */
-    req[n++] = 0x07;                 /* NegativeActionLabel */
-    pending_uid = uid;
-    ds_len = 0;
-    fetch_at = hal_millis() | 1;
-    cp_write(req, n);
-}
-
+   reassembled into one buffer). Which notification to fetch next, and
+   the timeout/retry, live in ancs_store.h. */
 static void fetch_pump(void)
 {
-    if (fetch_at && hal_millis() - fetch_at < 3000)
-        return;                      /* reply still coming */
-    fetch_at = 0;
-    if (!fq_n || state != ST_LIVE)
+    if (state != ST_LIVE)
         return;
-    uint32_t uid = fq[0];
-    memmove(fq, fq + 1, sizeof fq[0] * (FQ_N - 1));
-    fq_n--;
-    fetch_send(uid);
-}
-
-static void fetch_attrs(uint32_t uid)
-{
-    for (int i = 0; i < fq_n; i++)
-        if (fq[i] == uid)
-            return;
-    if (fq_n < FQ_N)
-        fq[fq_n++] = uid;
-    fetch_pump();
+    uint32_t uid = an_next_fetch(&ns, hal_millis());
+    if (!uid)
+        return;
+    uint8_t req[20];
+    int n = an_request(req, uid);
+    ds_len = 0;
+    cp_write(req, n);
 }
 
 void ancs_dismiss(uint32_t uid)
@@ -240,7 +164,7 @@ void ancs_dismiss(uint32_t uid)
     uint8_t req[6] = {0x02, uid & 0xFF, (uid >> 8) & 0xFF,
                       (uid >> 16) & 0xFF, (uid >> 24) & 0xFF, 0x01};
     cp_write(req, sizeof req);
-    slot_drop(uid);
+    an_drop(&ns, uid);
 }
 
 void ancs_positive(uint32_t uid)
@@ -260,75 +184,25 @@ static void on_ds(const uint8_t *d, int len)
     }
     memcpy(ds_buf + ds_len, d, len);
     ds_len += len;
-    if (ds_len < 5 || ds_buf[0] != 0x00)
-        return;
-    uint32_t uid = ds_buf[1] | (ds_buf[2] << 8) |
-                   ((uint32_t)ds_buf[3] << 16) | ((uint32_t)ds_buf[4] << 24);
-    struct ancs_notif *n = slot_for(uid);
-    int p = 5, complete = 1;
-    while (p < ds_len) {
-        if (p + 3 > ds_len) { complete = 0; break; }
-        int attr = ds_buf[p];
-        int alen = ds_buf[p + 1] | (ds_buf[p + 2] << 8);
-        if (p + 3 + alen > ds_len) { complete = 0; break; }
-        const uint8_t *v = ds_buf + p + 3;
-        int cl = alen;
-        switch (attr) {
-        case 0: {                    /* AppIdentifier -> friendly name */
-            const char *s = (const char *)v;
-            const char *dot = strrchr(s, '.');
-            s = dot ? dot + 1 : s;
-            int i = 0;
-            for (; s[i] && i < (int)sizeof n->app - 1; i++)
-                n->app[i] = (s[i] >= 'a' && s[i] <= 'z')
-                            ? s[i] - 32 : s[i];
-            n->app[i] = 0;
-            break;
-        }
-        case 1:
-            if (cl >= (int)sizeof n->title) cl = sizeof n->title - 1;
-            memcpy(n->title, v, cl); n->title[cl] = 0;
-            break;
-        case 3:
-            if (cl >= (int)sizeof n->msg) cl = sizeof n->msg - 1;
-            memcpy(n->msg, v, cl); n->msg[cl] = 0;
-            break;
-        case 6: n->has_pos = cl > 0; break;
-        case 7: n->has_neg = cl > 0; break;
-        }
-        p += 3 + alen;
-    }
-    if (complete) {
-        ds_len = 0;
-        notif_dirty = 1;
-        fetch_at = 0;
-        fetch_pump();
-    }
+    int r = an_on_ds(&ns, ds_buf, ds_len);
+    if (r == 0)
+        return;                      /* more fragments to come */
+    ds_len = 0;
+    if (r > 0)
+        fetch_pump();                /* next one without waiting */
 }
 
 static void on_ns(const uint8_t *d, int len)
 {
     if (len < 8)
         return;
-    uint8_t ev = d[0], flags = d[1];
+    uint8_t ev = d[0], flags = d[1], cat = d[2];
     uint32_t uid = d[4] | (d[5] << 8) |
                    ((uint32_t)d[6] << 16) | ((uint32_t)d[7] << 24);
-    if (ev == 2) {                   /* removed on the phone */
-        slot_drop(uid);
-        return;
-    }
-    if (ev > 1)
+    if (ev > 2)
         return;                      /* reserved event ids */
-    struct ancs_notif *n = slot_for(uid);
-    if (n->rx_ms == 0) {             /* genuinely new */
-        n->flags = flags;
-        n->rx_ms = hal_millis();
-        n->app[0] = n->title[0] = n->msg[0] = 0;
-        n->has_pos = n->has_neg = 0;
-        if (!(flags & 0x04))         /* PreExisting: shown, no buzz */
-            new_notif = 1;
-    }
-    fetch_attrs(uid);
+    an_on_ns(&ns, ev, flags, cat, uid, hal_millis());
+    fetch_pump();
 }
 
 void ancs_on_notify(uint16_t attr_handle, struct os_mbuf *om)
@@ -377,7 +251,7 @@ static int ns_sub_done(uint16_t conn, const struct ble_gatt_error *err,
     }
     state = ST_LIVE;
     ancs_tries = 0;
-    notif_dirty = 1;
+    ns.dirty = 1;
     gc_give(GC_ANCS);
     return 0;
 }
@@ -614,8 +488,7 @@ void ancs_on_connect(uint16_t conn)
     ancs_tries = 0;
     ancs_start_at = 0;
     gc_owner = GC_FREE;
-    cpq_n = fq_n = 0;
-    fetch_at = 0;
+    cpq_n = 0;
 }
 
 void ancs_on_disconnect(void)
@@ -627,11 +500,9 @@ void ancs_on_disconnect(void)
     cts_state = 0;
     ancs_start_at = 0;
     gc_owner = GC_FREE;
-    cpq_n = fq_n = 0;
-    fetch_at = 0;
-    notif_count = 0;
+    cpq_n = 0;
+    an_clear(&ns);       /* iOS sends the current set again on resubscribe */
     ds_len = 0;
-    notif_dirty = 1;
 }
 
 /* ENC_CHANGE ok: start (or, after a re-encryption, restart) the chain */

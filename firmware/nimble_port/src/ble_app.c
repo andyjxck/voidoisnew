@@ -157,18 +157,28 @@ static void ble_advertise(void)
         0xd0, 0x00, 0x2d, 0x12, 0x1e, 0x4b, 0x0f, 0xa4,
         0x99, 0x4e, 0xce, 0xb5, 0x31, 0xf4, 0x05, 0x79
     };
-    /* InfiniLink-compat: InfiniLink only lists peripherals named
-       "InfiniTime" / "Pinetime-JF". The name no longer fits next to the
-       ANCS solicitation (31 B), so it moves to the scan response. */
+    /* InfiniLink-compat, 2.2.2: laid out like InfiniTime's own advert.
+       InfiniLink's scan keeps a peripheral only when it is named
+       "InfiniTime" AND its advertised service list (AD 0x06/0x07, not
+       the 0x15 solicitation 2.1 sent) holds the DFU service
+       00001530-1212-EFDE-1523-785FEABCD123. Advert: flags, 16-bit
+       Heart Rate, 128-bit DFU, TX power (28 B). Scan response: the
+       name and the ANCS solicitation (30 B). */
     static const uint8_t adv_c[] = {
         0x02, 0x01, 0x06,
+        0x03, 0x03, 0x0D, 0x18,
+        0x11, 0x07,
+        0x23, 0xd1, 0xbc, 0xea, 0x5f, 0x78, 0x23, 0x15,
+        0xde, 0xef, 0x12, 0x12, 0x30, 0x15, 0x00, 0x00,
+        0x02, 0x0A, 0x00
+    };
+    static const uint8_t rsp_c[] = {
+        0x0B, 0x09, 'I', 'n', 'f', 'i', 'n', 'i', 'T', 'i', 'm', 'e',
         0x11, 0x15,
         0xd0, 0x00, 0x2d, 0x12, 0x1e, 0x4b, 0x0f, 0xa4,
         0x99, 0x4e, 0xce, 0xb5, 0x31, 0xf4, 0x05, 0x79
     };
-    static const uint8_t rsp_c[] = {
-        0x0B, 0x09, 'I', 'n', 'f', 'i', 'n', 'i', 'T', 'i', 'm', 'e'
-    };
+    _Static_assert(sizeof adv_c <= 31 && sizeof rsp_c <= 31, "adv > 31 B");
     struct ble_gap_adv_params p;
     memset(&p, 0, sizeof p);
     p.disc_mode = BLE_GAP_DISC_MODE_GEN;
@@ -234,7 +244,7 @@ int ble_init(void)
     ble_svc_gatt_init();
     extern void ble_dfu_init(void);
     ble_dfu_init();
-    phone_svcs_init();          /* CTS server, weather, music */
+    phone_svcs_init();          /* CTS, music, DIS, battery, HR, steps */
     nimble_mark(11);
     ble_svc_gap_device_name_set(ble_compat ? "InfiniTime" : "VoidOS");
     ble_hs_cfg.sync_cb = on_sync;
@@ -320,6 +330,11 @@ void ble_poll(void)
     }
     ancs_tick();
     ams_tick();
+    {
+        extern void phone_svcs_tick(uint32_t now);
+        extern uint32_t hal_millis(void);
+        phone_svcs_tick(hal_millis());
+    }
     /* write changed bonds to flash, never mid-pairing */
     {
         struct ble_gap_conn_desc bd;

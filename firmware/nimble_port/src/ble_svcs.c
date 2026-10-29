@@ -69,8 +69,22 @@ static int cts_access(uint16_t conn, uint16_t attr,
     int lti = arg != NULL;
     uint8_t *buf = lti ? cts_lti : cts_now;
     int cap = lti ? (int)sizeof cts_lti : (int)sizeof cts_now;
-    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        if (!lti) {          /* 2.2.2: a read gets the live clock */
+            extern int hal_clock_hour(void), hal_clock_minute(void),
+                       hal_clock_second(void);
+            extern void hal_clock_date(int *, int *, int *, int *);
+            int y, mo, d, dow;
+            hal_clock_date(&y, &mo, &d, &dow);
+            buf[0] = (uint8_t)y; buf[1] = (uint8_t)(y >> 8);
+            buf[2] = (uint8_t)mo; buf[3] = (uint8_t)d;
+            buf[4] = (uint8_t)hal_clock_hour();
+            buf[5] = (uint8_t)hal_clock_minute();
+            buf[6] = (uint8_t)hal_clock_second();
+            buf[7] = (uint8_t)dow; buf[8] = 0; buf[9] = 0;
+        }
         return os_mbuf_append(ctxt->om, buf, cap) ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;
+    }
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
         return BLE_ATT_ERR_UNLIKELY;
     int len = OS_MBUF_PKTLEN(ctxt->om);
@@ -87,82 +101,6 @@ static int cts_access(uint16_t conn, uint16_t attr,
     return 0;
 }
 
-/* ---- weather --------------------------------------------------------- */
-static struct wx wx_cur;
-static int wx_have;
-
-const struct wx *wx_get(void)
-{
-    if (!wx_have)
-        return NULL;
-    if (hal_millis() - wx_cur.rx_ms > 24u * 3600u * 1000u)
-        return NULL;
-    return &wx_cur;
-}
-
-const char *wx_name(int icon)
-{
-    static const char *n[WX_N] = {"CLEAR", "FEW CLOUDS", "CLOUDY",
-                                  "OVERCAST", "SHOWERS", "RAIN",
-                                  "THUNDER", "SNOW", "MIST"};
-    return icon >= 0 && icon < WX_N ? n[icon] : "--";
-}
-
-static int16_t rd16(const uint8_t *p) { return (int16_t)(p[0] | (p[1] << 8)); }
-
-int phone_weather_write(const uint8_t *b, int len)
-{
-    if (len < 2 || b[1] > 1)
-        return -1;                       /* unknown version */
-    if (b[0] == 0) {                     /* current weather */
-        if (len < 49)
-            return -1;
-        wx_cur.temp = rd16(b + 10);
-        wx_cur.tmin = rd16(b + 12);
-        wx_cur.tmax = rd16(b + 14);
-        memcpy(wx_cur.city, b + 16, 32);
-        wx_cur.city[32] = 0;
-        wx_cur.icon = b[48] < WX_N ? b[48] : WX_CLOUDS;
-        wx_cur.rx_ms = hal_millis();
-        wx_have = 1;
-        dirty = 3;
-        return 0;
-    }
-    if (b[0] == 1) {                     /* forecast */
-        if (len < 11)
-            return -1;
-        int n = b[10];
-        if (n > WX_MAX_DAYS)
-            n = WX_MAX_DAYS;
-        if (len < 11 + n * 5)
-            n = (len - 11) / 5;
-        for (int i = 0; i < n; i++) {
-            const uint8_t *p = b + 11 + i * 5;
-            wx_cur.day[i].tmin = rd16(p);
-            wx_cur.day[i].tmax = rd16(p + 2);
-            wx_cur.day[i].icon = p[4] < WX_N ? p[4] : WX_CLOUDS;
-        }
-        wx_cur.ndays = n;
-        dirty = 3;
-        return 0;
-    }
-    return -1;
-}
-
-static int wx_access(uint16_t conn, uint16_t attr,
-                     struct ble_gatt_access_ctxt *ctxt, void *arg)
-{
-    (void)conn; (void)attr; (void)arg;
-    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
-        return BLE_ATT_ERR_UNLIKELY;
-    uint8_t b[64];
-    int len = OS_MBUF_PKTLEN(ctxt->om);
-    if (len > (int)sizeof b)
-        len = sizeof b;
-    os_mbuf_copydata(ctxt->om, 0, len, b);
-    phone_weather_write(b, len);         /* bad packets are just ignored */
-    return 0;
-}
 
 /* ---- music ----------------------------------------------------------- */
 static struct music ms;
@@ -296,12 +234,85 @@ void music_cmd(int c)
 
 int music_vol_ok(void) { return 1; }
 
+/* ---- InfiniTime-shaped info services (2.2.2) -------------------------
+   What InfiniLink reads after it connects, laid out as InfiniTime has
+   them: Device Information (0x180A), Battery (0x180F), Heart Rate
+   (0x180D) and the InfiniTime motion service's step count. */
+#if __has_include("gen/version.h")
+#include "gen/version.h"
+#endif
+#ifndef VOIDOS_VERSION
+#define VOIDOS_VERSION "dev"
+#endif
+static const char *const dis_str[] = {
+    "PINE64", "PineTime", "0", VOIDOS_VERSION, "1.0.0", "VoidOS"
+};
+static int dis_access(uint16_t conn, uint16_t attr,
+                      struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn; (void)attr;
+    const char *v = dis_str[(int)(intptr_t)arg];
+    return os_mbuf_append(ctxt->om, v, strlen(v)) ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;
+}
+
+extern int hal_battery_pct(void);
+extern int sensors_bpm(void);
+extern int sensors_bpm_stale(void);
+extern int ui_steps_today(void);
+static uint16_t bas_h, hrs_h, steps_h;
+static int info_value(int which, uint8_t *b)
+{
+    if (which == 0) {                         /* battery % */
+        int p = hal_battery_pct();
+        b[0] = (uint8_t)(p < 0 ? 0 : p > 100 ? 100 : p);
+        return 1;
+    }
+    if (which == 1) {                         /* HR measurement: flags, bpm */
+        int v = sensors_bpm();
+        b[0] = 0;
+        b[1] = (uint8_t)(v > 0 && !sensors_bpm_stale() && v < 256 ? v : 0);
+        return 2;
+    }
+    int st = ui_steps_today();                /* steps today, le32 */
+    uint32_t u = st > 0 ? (uint32_t)st : 0;
+    b[0] = (uint8_t)u; b[1] = (uint8_t)(u >> 8);
+    b[2] = (uint8_t)(u >> 16); b[3] = (uint8_t)(u >> 24);
+    return 4;
+}
+static int info_access(uint16_t conn, uint16_t attr,
+                       struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn; (void)attr;
+    uint8_t b[4];
+    int n = info_value((int)(intptr_t)arg, b);
+    return os_mbuf_append(ctxt->om, b, n) ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;
+}
+
+/* push battery / heart rate / steps to a subscribed app when they
+   change, checked every 5 s from the BLE poll */
+void phone_svcs_tick(uint32_t now)
+{
+    static uint32_t last;
+    static uint8_t prev[3][4];
+    if (!ble_connected() || now - last < 5000)
+        return;
+    last = now;
+    const uint16_t h[3] = {bas_h, hrs_h, steps_h};
+    for (int i = 0; i < 3; i++) {
+        uint8_t b[4] = {0};
+        info_value(i, b);
+        if (memcmp(b, prev[i], 4)) {
+            memcpy(prev[i], b, 4);
+            if (h[i])
+                ble_gatts_chr_updated(h[i]);
+        }
+    }
+}
+
 /* ---- GATT tables ----------------------------------------------------- */
 #define IT_UUID(b13, b12, b14) BLE_UUID128_INIT(0xd0, 0x42, 0x19, 0x3a, 0x3b, 0x43, \
     0x23, 0x8e, 0xfe, 0x48, 0xfc, 0x78, b12, b13, b14, 0x00)
 
-static const ble_uuid128_t u_wx = IT_UUID(0x00, 0x00, 0x05);
-static const ble_uuid128_t u_wx_data = IT_UUID(0x00, 0x01, 0x05);
 static const ble_uuid128_t u_ms = IT_UUID(0x00, 0x00, 0x00);
 static const ble_uuid128_t u_ms_c[12] = {
     IT_UUID(0x00, 0x01, 0), IT_UUID(0x00, 0x02, 0), IT_UUID(0x00, 0x03, 0),
@@ -313,7 +324,47 @@ static const ble_uuid128_t u_ms_c[12] = {
 #define MSC(i) { .uuid = &u_ms_c[(i) - 1].u, .access_cb = ms_access, \
                  .arg = (void *)(intptr_t)(i), .flags = RW }
 
+#define DIS(uuid16, i) { .uuid = BLE_UUID16_DECLARE(uuid16), \
+    .access_cb = dis_access, .arg = (void *)(i), .flags = BLE_GATT_CHR_F_READ }
+static const ble_uuid128_t u_motion = IT_UUID(0x00, 0x00, 0x03);
+static const ble_uuid128_t u_steps = IT_UUID(0x00, 0x01, 0x03);
+
 static const struct ble_gatt_svc_def phone_svcs[] = {
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = BLE_UUID16_DECLARE(0x180A),
+        .characteristics = (struct ble_gatt_chr_def[]){
+            DIS(0x2A29, 0), DIS(0x2A24, 1), DIS(0x2A25, 2),
+            DIS(0x2A26, 3), DIS(0x2A27, 4), DIS(0x2A28, 5),
+            { 0 } },
+    },
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = BLE_UUID16_DECLARE(0x180F),
+        .characteristics = (struct ble_gatt_chr_def[]){
+            { .uuid = BLE_UUID16_DECLARE(0x2A19), .access_cb = info_access,
+              .arg = (void *)0, .val_handle = &bas_h,
+              .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY },
+            { 0 } },
+    },
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = BLE_UUID16_DECLARE(0x180D),
+        .characteristics = (struct ble_gatt_chr_def[]){
+            { .uuid = BLE_UUID16_DECLARE(0x2A37), .access_cb = info_access,
+              .arg = (void *)1, .val_handle = &hrs_h,
+              .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY },
+            { 0 } },
+    },
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &u_motion.u,
+        .characteristics = (struct ble_gatt_chr_def[]){
+            { .uuid = &u_steps.u, .access_cb = info_access,
+              .arg = (void *)2, .val_handle = &steps_h,
+              .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY },
+            { 0 } },
+    },
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = BLE_UUID16_DECLARE(0x1805),
@@ -322,14 +373,6 @@ static const struct ble_gatt_svc_def phone_svcs[] = {
               .flags = RW },
             { .uuid = BLE_UUID16_DECLARE(0x2A0F), .access_cb = cts_access,
               .arg = (void *)1, .flags = RW },
-            { 0 } },
-    },
-    {
-        .type = BLE_GATT_SVC_TYPE_PRIMARY,
-        .uuid = &u_wx.u,
-        .characteristics = (struct ble_gatt_chr_def[]){
-            { .uuid = &u_wx_data.u, .access_cb = wx_access,
-              .flags = BLE_GATT_CHR_F_WRITE },
             { 0 } },
     },
     {

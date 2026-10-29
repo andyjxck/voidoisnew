@@ -1,7 +1,7 @@
 /* VoidOS visual language, shared by the face and every app screen:
  * neon outlines on black — chamfered "pill" cards, pointy-top hexes,
  * cyan (0x46D8E0) for the main accent and red (0xF0586E) for the hot
- * one — plus the line-art icons the new weather/music screens need.
+ * one — plus the line-art icons the music screen needs.
  * Header-only (static) so the host renderer (tests/uisnap) and the
  * firmware build it the same way. */
 #ifndef VOIDOS_UI_DECO_H
@@ -123,92 +123,6 @@ static inline void dk_rule(lv_layer_t *l, int y, lv_color_t c)
     dk_hex(l, 120, y, 6, c, 2);
 }
 
-/* degree ring for temperatures (the pixel font has no °) */
-static inline void dk_deg(lv_layer_t *l, int x, int y, int r, lv_color_t c)
-{
-    dk_arc(l, x + r, y + r, r, 2, 0, 360, c);
-}
-
-/* ---- weather glyphs: line art inside a (2s x 2s) box ---------------- */
-static inline void dk_cloud(lv_layer_t *l, int cx, int cy, int s,
-                            lv_color_t c, int lw)
-{
-    dk_arc(l, cx - s / 3, cy, s / 3, lw, 90, 270, c);
-    dk_arc(l, cx - s / 8, cy - s / 4, s / 3, lw, 180, 330, c);
-    dk_arc(l, cx + s / 3, cy - s / 8, s * 3 / 8, lw, 240, 90, c);
-    dk_line(l, cx - s / 3, cy + s / 3, cx + s / 3, cy + s / 4 + s / 8 - 1, c, lw);
-}
-
-static inline void dk_sun(lv_layer_t *l, int cx, int cy, int s, lv_color_t c,
-                          int lw)
-{
-    int r = s * 4 / 10;
-    dk_arc(l, cx, cy, r, lw, 0, 360, c);
-    static const int dx[8] = {1000, 707, 0, -707, -1000, -707, 0, 707};
-    static const int dy[8] = {0, 707, 1000, 707, 0, -707, -1000, -707};
-    for (int i = 0; i < 8; i++)
-        dk_line(l, cx + dx[i] * (r + s / 6) / 1000, cy + dy[i] * (r + s / 6) / 1000,
-                cx + dx[i] * (s - 1) / 1000, cy + dy[i] * (s - 1) / 1000, c, lw);
-}
-
-static inline void dk_wx_icon(lv_layer_t *l, int icon, int cx, int cy, int s,
-                              lv_color_t c)
-{
-    int lw = s >= 20 ? 3 : 2;
-    lv_color_t sun = DK_AMBER;
-    switch (icon) {
-    case 0:                                   /* clear */
-        dk_sun(l, cx, cy, s, sun, lw);
-        break;
-    case 1:                                   /* few clouds */
-        dk_sun(l, cx - s / 3, cy - s / 3, s * 2 / 3, sun, lw > 2 ? 2 : lw);
-        dk_cloud(l, cx + s / 6, cy + s / 5, s * 3 / 4, c, lw);
-        break;
-    case 2:                                   /* clouds */
-        dk_cloud(l, cx, cy, s, c, lw);
-        break;
-    case 3:                                   /* heavy clouds */
-        dk_cloud(l, cx - s / 5, cy - s / 4, s * 2 / 3, DK_GREY, lw);
-        dk_cloud(l, cx + s / 6, cy + s / 6, s * 3 / 4, c, lw);
-        break;
-    case 4:                                   /* showers */
-    case 5:                                   /* rain */
-        dk_cloud(l, cx, cy - s / 4, s * 3 / 4, c, lw);
-        for (int i = -1; i <= 1; i++) {
-            if (icon == 4 && i == 0)
-                continue;
-            int x = cx + i * s / 3;
-            dk_line(l, x, cy + s / 3, x - s / 8, cy + s - 2, DK_CYAN, lw);
-        }
-        break;
-    case 6:                                   /* thunderstorm */
-        dk_cloud(l, cx, cy - s / 4, s * 3 / 4, c, lw);
-        dk_line(l, cx + s / 8, cy + s / 4, cx - s / 6, cy + s * 3 / 5, sun, lw);
-        dk_line(l, cx - s / 6, cy + s * 3 / 5, cx + s / 8, cy + s * 3 / 5, sun, lw);
-        dk_line(l, cx + s / 8, cy + s * 3 / 5, cx - s / 8, cy + s - 1, sun, lw);
-        break;
-    case 7:                                   /* snow */
-        dk_cloud(l, cx, cy - s / 4, s * 3 / 4, c, lw);
-        for (int i = -1; i <= 1; i++) {
-            int x = cx + i * s / 3, y = cy + s * 2 / 3;
-            int r = s / 7 + 1;
-            dk_line(l, x - r, y, x + r, y, lv_color_white(), 2);
-            dk_line(l, x, y - r, x, y + r, lv_color_white(), 2);
-        }
-        break;
-    case 8:                                   /* mist */
-        for (int i = 0; i < 4; i++) {
-            int y = cy - s * 3 / 5 + i * s * 2 / 5;
-            int o = (i & 1) ? s / 4 : 0;
-            dk_line(l, cx - s + o + 2, y, cx + s - (s / 4 - o) - 2, y, c, lw);
-        }
-        break;
-    default:                                  /* no data: dashed hex */
-        dk_hex(l, cx, cy, s, DK_DIM, 2);
-        dk_line(l, cx - s / 3, cy, cx + s / 3, cy, DK_GREY, 2);
-        break;
-    }
-}
 
 /* ---- music glyphs ----------------------------------------------------- */
 enum { DK_M_PLAY, DK_M_PAUSE, DK_M_NEXT, DK_M_PREV, DK_M_VOLUP, DK_M_VOLDN,

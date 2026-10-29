@@ -11,6 +11,8 @@ extern const lv_font_t kenney9, kenney12, kenney16, kenney24, kenney56;
 int sensors_bpm(void);
 int sensors_bpm_stale(void);   /* 1 = held last reading, show greyed */
 int ui_steps(void);
+int ui_steps_today(void);
+int ui_water_ml(void);
 int sensors_ppg(int i, int *out_y100);
 int sensors_hrs_ok(void);
 int hal_clock_synced(void);
@@ -574,7 +576,7 @@ void ui_face_tick(void)
 
     if (is_digital) {
         bpm_label(d_lbl_bpm, 0xF0586E);
-        int steps = ui_steps();
+        int steps = ui_steps_today();
         if (steps != last_steps) {
             if (steps < 0)
                 lv_snprintf(buf, sizeof buf, "--");
@@ -642,7 +644,7 @@ void ui_face_tick(void)
     }
 
     bpm_label(lbl_bpm, 0xD8E0EC);
-    int steps = ui_steps();
+    int steps = ui_steps_today();
     if (steps != last_steps) {
         lv_snprintf(buf, sizeof buf, "%d", steps >= 0 ? steps : 0);
         lv_label_set_text(lbl_steps, steps >= 0 ? buf : "--");

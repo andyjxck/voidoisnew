@@ -102,14 +102,178 @@ static void finding(int bad, const char *fmt, ...)
     }
 }
 
+/* ---- text layout audit (2.2.2) ----
+   Every piece of text on a shot becomes an ink box: labels from their
+   laid-out text size, alignment and clip, canvas text from draw_txt().
+   A shot fails when two text boxes share a pixel, when text is cut by
+   its own box or an ancestor's, when text sits partly on a bar or
+   divider, or when text inside a card or button comes closer than
+   TXT_PAD px to the card's edge. */
+#define TXT_PAD 2
+struct tbox { int x1, y1, x2, y2; const void *obj; char s[40]; };
+static struct tbox tb[96];
+static int ntb;
+static struct tbox shp[48];
+static int nshp;
+static void tb_add(int x1, int y1, int x2, int y2, const void *obj,
+                   const char *s)
+{
+    for (int i = 0; i < ntb; i++)
+        if (tb[i].x1 == x1 && tb[i].y1 == y1 && tb[i].x2 == x2 &&
+            tb[i].y2 == y2 && !strncmp(tb[i].s, s, sizeof tb[i].s - 1))
+            return;                       /* canvas redrawn: same text */
+    if (ntb >= 96)
+        return;
+    struct tbox *b = &tb[ntb++];
+    b->x1 = x1; b->y1 = y1; b->x2 = x2; b->y2 = y2; b->obj = obj;
+    snprintf(b->s, sizeof b->s, "%s", s);
+}
+
+/* rows of ink inside a line box: top and bottom glyph pixel rows of
+   the text, measured from the line's top */
+static void ink_rows(const lv_font_t *f, const char *s, int *top, int *bot)
+{
+    int base = f->line_height - f->base_line, t = f->line_height, b = -1;
+    for (const char *p = s; *p; p++) {
+        if (*p == ' ' || *p == '\n')
+            continue;
+        lv_font_glyph_dsc_t g;
+        if (!lv_font_get_glyph_dsc(f, &g, (uint8_t)*p, 0) || !g.box_h)
+            continue;
+        int gt = base - (g.ofs_y + g.box_h), gb = base - g.ofs_y - 1;
+        if (gt < t) t = gt;
+        if (gb > b) b = gb;
+    }
+    if (b < 0) { t = 0; b = f->line_height - 1; }
+    *top = t; *bot = b;
+}
+
 static void snap_text(const struct _lv_font_t *f, const char *s, int x, int y,
                       int w)
 {
     int tw = (int)lv_text_get_width(s, strlen(s), (const lv_font_t *)f, 0);
     int cx = x + w / 2;
+    if (tw > 0) {
+        int it, ib;
+        ink_rows((const lv_font_t *)f, s, &it, &ib);
+        tb_add(cx - tw / 2, y + it, cx - tw / 2 + tw - 1, y + ib, NULL, s);
+    }
     finding(tw > w || cx - tw / 2 < 0 || cx + tw / 2 > 240,
             "canvas text \"%s\" %d px in a %d px box at %d,%d", s, tw, w,
             cx - tw / 2, y);
+}
+
+static void label_box(lv_obj_t *o)
+{
+    const char *t = lv_label_get_text(o);
+    const lv_font_t *f = lv_obj_get_style_text_font(o, LV_PART_MAIN);
+    lv_area_t c;
+    lv_obj_get_content_coords(o, &c);
+    int cw = c.x2 - c.x1 + 1, ch = c.y2 - c.y1 + 1;
+    lv_label_long_mode_t lm = lv_label_get_long_mode(o);
+    int ls = lv_obj_get_style_text_line_space(o, LV_PART_MAIN);
+    int lsp = lv_obj_get_style_text_letter_space(o, LV_PART_MAIN);
+    lv_point_t sz;
+    int maxw = (lm == LV_LABEL_LONG_MODE_WRAP || lm == LV_LABEL_LONG_MODE_DOTS)
+               && lv_obj_get_style_width(o, LV_PART_MAIN) != LV_SIZE_CONTENT
+               ? cw : LV_COORD_MAX;
+    lv_text_get_size(&sz, t, f, lsp, ls, maxw, LV_TEXT_FLAG_NONE);
+    int tw = sz.x < cw ? sz.x : cw, th = sz.y;
+    int cut = th > ch + 1 && lm != LV_LABEL_LONG_MODE_DOTS &&
+              lm != LV_LABEL_LONG_MODE_SCROLL &&
+              lm != LV_LABEL_LONG_MODE_SCROLL_CIRCULAR;
+    if (th > ch)
+        th = ch;
+    lv_text_align_t al = lv_obj_get_style_text_align(o, LV_PART_MAIN);
+    int x1 = c.x1;
+    if (al == LV_TEXT_ALIGN_CENTER)
+        x1 = c.x1 + (cw - tw) / 2;
+    else if (al == LV_TEXT_ALIGN_RIGHT)
+        x1 = c.x2 - tw + 1;
+    int it, ib;
+    ink_rows(f, t, &it, &ib);
+    int lh = f->line_height;
+    int x2 = x1 + tw - 1, y1 = c.y1 + it, y2 = c.y1 + th - lh + ib;
+    if (y2 > c.y2) y2 = c.y2;
+    finding(cut, "text \"%.30s\" needs %d px, its box is %d px: cut off",
+            t, sz.y, ch);
+    /* ancestors clip their children */
+    for (lv_obj_t *p = lv_obj_get_parent(o); p && lv_obj_get_parent(p);
+         p = lv_obj_get_parent(p)) {
+        if (lv_obj_has_flag(p, LV_OBJ_FLAG_OVERFLOW_VISIBLE))
+            continue;
+        lv_area_t pa;
+        lv_obj_get_coords(p, &pa);
+        if (x1 < pa.x1 || x2 > pa.x2 || y1 < pa.y1 || y2 > pa.y2) {
+            finding(1, "text \"%.30s\" at %d,%d-%d,%d is cut by its container"
+                    " %d,%d-%d,%d", t, x1, y1, x2, y2, pa.x1, pa.y1, pa.x2, pa.y2);
+            break;
+        }
+        /* padding inside the nearest visible card or button */
+        if (lv_obj_get_style_bg_opa(p, LV_PART_MAIN) > 0 ||
+            lv_obj_get_style_border_width(p, LV_PART_MAIN) > 0) {
+            int w = pa.x2 - pa.x1 + 1;
+            if (w < 236) {
+                int m = x1 - pa.x1;
+                if (pa.x2 - x2 < m) m = pa.x2 - x2;
+                if (y1 - pa.y1 < m) m = y1 - pa.y1;
+                if (pa.y2 - y2 < m) m = pa.y2 - y2;
+                finding(m < TXT_PAD, "text \"%.30s\" is %d px from its card's"
+                        " edge (min %d)", t, m, TXT_PAD);
+            }
+            break;
+        }
+    }
+    tb_add(x1, y1, x2, y2, o, t);
+}
+
+static int ovl(const struct tbox *a, const struct tbox *b)
+{
+    return a->x1 <= b->x2 && b->x1 <= a->x2 && a->y1 <= b->y2 && b->y1 <= a->y2;
+}
+
+/* drop screen text that an opaque overlay object covers */
+static void occlude(lv_obj_t *o)
+{
+    if (lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN))
+        return;
+    if (lv_obj_get_parent(o) && lv_obj_get_style_bg_opa(o, LV_PART_MAIN) >= LV_OPA_COVER) {
+        lv_area_t a;
+        lv_obj_get_coords(o, &a);
+        struct tbox ob = {a.x1, a.y1, a.x2, a.y2, o, ""};
+        int k = 0;
+        for (int i = 0; i < ntb; i++)
+            if (!ovl(&tb[i], &ob))
+                tb[k++] = tb[i];
+        ntb = k;
+        k = 0;
+        for (int i = 0; i < nshp; i++)
+            if (!ovl(&shp[i], &ob))
+                shp[k++] = shp[i];
+        nshp = k;
+    }
+    for (uint32_t i = 0; i < lv_obj_get_child_count(o); i++)
+        occlude(lv_obj_get_child(o, i));
+}
+
+static int text_overlaps;
+static void text_audit(void)
+{
+    for (int i = 0; i < ntb; i++)
+        for (int j = i + 1; j < ntb; j++)
+            if (ovl(&tb[i], &tb[j])) {
+                text_overlaps++;
+                finding(1, "text \"%s\" %d,%d-%d,%d overlaps \"%s\" %d,%d-%d,%d",
+                        tb[i].s, tb[i].x1, tb[i].y1, tb[i].x2, tb[i].y2,
+                        tb[j].s, tb[j].x1, tb[j].y1, tb[j].x2, tb[j].y2);
+            }
+    for (int i = 0; i < ntb; i++)
+        for (int k = 0; k < nshp; k++)
+            if (ovl(&tb[i], &shp[k]))
+                finding(1, "text \"%s\" %d,%d-%d,%d is drawn over a bar at"
+                        " %d,%d-%d,%d", tb[i].s, tb[i].x1, tb[i].y1, tb[i].x2,
+                        tb[i].y2, shp[k].x1, shp[k].y1, shp[k].x2, shp[k].y2);
+    finding(0, "text layout: %d text boxes", ntb);
 }
 
 static lv_area_t tgt[64];
@@ -152,6 +316,17 @@ static void walk(lv_obj_t *o, int depth)
         if (off || spill)
             finding(1, "label \"%s\" %s", lv_label_get_text(o),
                     off ? "runs off screen" : "spills out of its button");
+    }
+    if (lv_obj_check_type(o, &lv_label_class) && *lv_label_get_text(o))
+        label_box(o);
+    else if (!lv_obj_check_type(o, &lv_label_class) &&
+             lv_obj_get_child_count(o) == 0 && depth > 1 &&
+             lv_obj_get_style_bg_opa(o, LV_PART_MAIN) > 0 &&
+             (lv_obj_check_type(o, &lv_bar_class) || h <= 6 || w <= 6) &&
+             nshp < 48) {
+        struct tbox *b = &shp[nshp++];      /* bar, divider, tick */
+        b->x1 = a.x1; b->y1 = a.y1; b->x2 = a.x2; b->y2 = a.y2; b->obj = o;
+        b->s[0] = 0;
     }
     const char *kind = lv_obj_check_type(o, &lv_label_class) ? "label" :
                        lv_obj_check_type(o, &lv_button_class) ? "button" : "obj";
@@ -216,6 +391,8 @@ static void shot(const char *dir, scr_t s, const char *name)
 {
     cur_name = name;
     ntgt = 0;
+    ntb = 0;
+    nshp = 0;
     cur = s;
     rebuild();
     settle();
@@ -224,8 +401,11 @@ static void shot(const char *dir, scr_t s, const char *name)
     snprintf(path, sizeof path, "%s/%s.txt", dir, name);
     audit = fopen(path, "w");
     walk(lv_screen_active(), 0);
-    if (lv_obj_get_child_count(lv_layer_top()))
+    if (lv_obj_get_child_count(lv_layer_top())) {
+        occlude(lv_layer_top());        /* overlay hides the screen under it */
         walk(lv_layer_top(), 0);
+    }
+    text_audit();
     {
         static const char *lcn[LC_N], *ccn[CCW_DEFN], *stn[16];
         for (int i = 0; i < LC_N; i++) lcn[i] = lc_apps[i].name;
