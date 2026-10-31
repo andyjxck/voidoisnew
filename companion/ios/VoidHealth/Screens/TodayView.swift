@@ -5,7 +5,9 @@ import VoidHealthCore
 /// steps, heart rate, water and workouts. Pages back through earlier days.
 struct TodayView: View {
     @Environment(AppModel.self) private var app
+    @Environment(\.scenePhase) private var phase
     @State private var page = 0
+    @State private var celebrating: GoalHit?
 
     var body: some View {
         let m = app.model
@@ -90,6 +92,25 @@ struct TodayView: View {
             WorkoutDetailView(workout: w)
         }
         .refreshable { await pullToRefresh() }
+        .overlay(alignment: .top) {
+            if let hit = celebrating {
+                GoalCelebration(hit: hit) {
+                    celebrating = nil
+                    nextCelebration()
+                }
+                .id(hit)
+            }
+        }
+        .onAppear { nextCelebration() }
+        .onChange(of: app.goalQueue) { nextCelebration() }
+        .onChange(of: phase) { nextCelebration() }
+    }
+
+    /// play the next goal met today, once Today is on screen
+    private func nextCelebration() {
+        guard celebrating == nil, phase == .active, let hit = app.takeCelebration() else { return }
+        celebrating = hit
+        GoalNotifier.requestIfNeeded()    // asks once, at a moment that explains it
     }
 
     /// keeps the spinner up briefly while the watch answers

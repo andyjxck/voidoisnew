@@ -39,7 +39,7 @@ build/test_ble_units: tests/ble/test_ble_units.c firmware/nimble_port/src/gatt_o
 	$(CC) -std=gnu11 -O1 -Wall -Wextra -Ifirmware -I$(TINYCRYPT)/include tests/ble/test_ble_units.c $(TINYCRYPT)/src/aes_encrypt.c $(TINYCRYPT)/src/utils.c -o $@
 
 # 2.2.2: notification store, app names, text folding, midnight reset
-build/test_store_daily: tests/ble/test_store_daily.c firmware/nimble_port/src/ancs_store.h firmware/daily.h
+build/test_store_daily: tests/ble/test_store_daily.c firmware/nimble_port/src/ancs_store.h firmware/daily.h firmware/goal.h
 	mkdir -p build
 	$(CC) -std=gnu11 -O1 -Wall -Wextra -Wno-unused-function -Ifirmware tests/ble/test_store_daily.c -o $@
 

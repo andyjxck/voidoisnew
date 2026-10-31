@@ -9,6 +9,7 @@ struct YouView: View {
     @State private var exportFailed = false
     @State private var confirmErase = false
     @State private var confirmForget = false
+    @AppStorage(GoalNotifier.enabledKey) private var goalNotifications = true
 
     var body: some View {
         @Bindable var app = app
@@ -38,8 +39,14 @@ struct YouView: View {
                         in: 240...720, step: 15)
                 Stepper(p.calorieGoal > 0 ? "Calories: \(Fmt.number(p.calorieGoal)) kcal" : "Calories: no goal",
                         value: $app.profile.calorieGoal, in: 0...6000, step: 100)
+                Toggle("Notify me when I hit a goal", isOn: $goalNotifications)
+                    .onChange(of: goalNotifications) { _, on in
+                        if on { GoalNotifier.requestIfNeeded() }
+                    }
             } header: {
                 Text("Daily goals")
+            } footer: {
+                Text("Closing a ring celebrates once a day, on Today and on your watch. The watch gets your step and water goals when it syncs.")
             }
 
             Section {

@@ -942,6 +942,23 @@ int main(int argc, char **argv)
         shot(dir, SCR_CC, "43_cc_charging_icon");
         snap_on_charger = 0; snap_charging = 0; snap_batt_pct = 81;
     }
+    {   /* 2.4.0 goal celebrations: frames at fixed points of the 2 s
+           animation (goal_el is only advanced by ui_tick, which the snap
+           never runs), then the water screen with a goal from the app */
+        goal_show(now_ms, GOAL_STEPS);
+        goal_el = 250; shot(dir, SCR_FACE, "44_goal_steps_sweep");
+        goal_el = 900; shot(dir, SCR_FACE, "45_goal_steps_burst");
+        goal_el = 1700; shot(dir, SCR_FACE, "46_goal_steps_falling");
+        ui_swipe(1, 120);
+        finding(goal_visible() ? 1 : 0, "a swipe closes the goal celebration");
+        goal_show(now_ms, GOAL_WATER);
+        goal_el = 900; shot(dir, SCR_FACE, "47_goal_water_burst");
+        goal_el = 3000; shot(dir, SCR_FACE, "48_goal_water_settled");
+        goal_hide();
+        goal_water_qv = goal_water_store(2500);
+        DL.water_ml = 750; shot(dir, SCR_WATER, "49_water_goal_2500");
+        goal_water_qv = 0;
+    }
     cur_name = "";
     printf("wrote screens to %s; tap/text audit: %d checks, %d failed\n",
            dir, checks, fails);

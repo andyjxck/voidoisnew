@@ -300,3 +300,121 @@ struct Screen<Content: View>: View {
         .background(Color(.systemGroupedBackground))
     }
 }
+
+// MARK: goal celebration
+
+/// A goal ring closing on Today: a confetti burst, a banner naming the
+/// goal and a success haptic. Plays for about 3 seconds, then calls
+/// `onDone`. With Reduce Motion on it shows the banner without confetti.
+struct GoalCelebration: View {
+    let hit: GoalHit
+    var onDone: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var start = Date()
+    @State private var shown = false
+    @State private var pieces = ConfettiPiece.burst(count: 80)
+
+    private var color: Color { hit.goal.metric.color }
+
+    private var detail: String {
+        switch hit.goal {
+        case .steps: return "\(Fmt.number(hit.target)) steps"
+        case .activeMinutes: return "\(hit.target) active minutes"
+        case .water: return "\(Fmt.number(hit.target)) ml of water"
+        }
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            if !reduceMotion {
+                TimelineView(.animation) { tl in
+                    let t = tl.date.timeIntervalSince(start)
+                    Canvas { ctx, size in
+                        for p in pieces { p.draw(in: &ctx, size: size, t: t) }
+                    }
+                }
+                .frame(height: 560)
+            }
+            HStack(spacing: 12) {
+                Image(systemName: hit.goal.metric.icon)
+                    .font(.title3.weight(.bold))
+                    .foregroundStyle(.black)
+                    .frame(width: 44, height: 44)
+                    .background(Circle().fill(color))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(hit.goal.title).font(.headline)
+                    Text(detail).font(.subheadline).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.leading, 10)
+            .padding(.trailing, 20)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay { Capsule().strokeBorder(color.opacity(0.7), lineWidth: 1) }
+            .shadow(color: color.opacity(0.35), radius: 14)
+            .padding(.top, 8)
+            .scaleEffect(shown ? 1 : 0.6)
+            .opacity(shown ? 1 : 0)
+            .accessibilityElement(children: .combine)
+        }
+        .allowsHitTesting(false)          // the screen underneath stays usable
+        .sensoryFeedback(.success, trigger: shown) { _, now in now }
+        .task {
+            start = Date()
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.6)) { shown = true }
+            AccessibilityNotification.Announcement("\(hit.goal.title), \(detail)").post()
+            try? await Task.sleep(for: .seconds(2.8))
+            withAnimation(.easeOut(duration: 0.3)) { shown = false }
+            try? await Task.sleep(for: .seconds(0.35))
+            onDone()
+        }
+    }
+}
+
+/// One bit of confetti: popped up from behind the banner, then falling
+/// with a little sway, tumbling as it goes.
+struct ConfettiPiece {
+    var x0: Double            // start, as a share of the width
+    var vx: Double            // pt/s
+    var vy: Double            // pt/s, negative is up
+    var spin: Double          // rad/s
+    var flip: Double          // rad/s, the paper turning over
+    var sway: Double          // pt
+    var size: CGSize
+    var round: Bool
+    var color: Color
+
+    private static let colors: [Color] = [.teal, .green, .cyan, .yellow, .pink, .orange, .mint]
+
+    static func burst(count: Int) -> [ConfettiPiece] {
+        (0..<count).map { _ in
+            let round = Double.random(in: 0...1) < 0.25
+            let w = round ? 6.0 : Double.random(in: 6...10)
+            return ConfettiPiece(x0: Double.random(in: 0.3...0.7),
+                                 vx: Double.random(in: -190...190),
+                                 vy: Double.random(in: -520 ... -160),
+                                 spin: Double.random(in: -9...9),
+                                 flip: Double.random(in: 4...11),
+                                 sway: Double.random(in: 4...14),
+                                 size: CGSize(width: w, height: round ? w : w * 0.55),
+                                 round: round,
+                                 color: colors.randomElement()!)
+        }
+    }
+
+    func draw(in ctx: inout GraphicsContext, size: CGSize, t: Double) {
+        guard t >= 0, t < 3.1 else { return }
+        let g = 700.0
+        let drag = 1 - min(t, 2.5) * 0.18
+        let x = size.width * x0 + vx * t * drag + sin(t * 5 + vx) * sway
+        let y = 30 + vy * t + 0.5 * g * t * t
+        guard y < size.height + 20, y > -40 else { return }
+        var c = ctx
+        c.opacity = t < 2.3 ? 1 : max(0, 1 - (t - 2.3) / 0.8)
+        c.translateBy(x: x, y: y)
+        c.rotate(by: .radians(spin * t))
+        c.scaleBy(x: max(0.15, abs(cos(flip * t))), y: 1)
+        let r = CGRect(x: -size.width / 2, y: -size.height / 2, width: size.width, height: size.height)
+        c.fill(round ? Path(ellipseIn: r) : Path(r), with: .color(color))
+    }
+}

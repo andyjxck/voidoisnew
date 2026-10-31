@@ -29,7 +29,7 @@ ICONS = [
     ("FLASHLIGHT",    "flashlight_on",         1, [20, 24]),
     ("DND",           "do_not_disturb_on",     1, [20, 24]),
     ("WATER_LOCK",    "water_lock",            1, [20, 24]),
-    ("FOOTPRINT",     "footprint",             1, [16, 20, 24]),
+    ("FOOTPRINT",     "footprint",             1, [16, 20, 24, 36]),
     ("FIRE",          "local_fire_department", 1, [20, 24]),
     ("BOLT",          "bolt",                  1, [16, 20, 24, 36]),
     ("BATT_0",        "battery_0_bar",         1, [20, 24]),

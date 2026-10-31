@@ -67,6 +67,11 @@ final class WatchLink: NSObject {
     @ObservationIgnored private var ackTask: Task<Void, Never>?
     @ObservationIgnored private var encRetries = 0
     @ObservationIgnored private var encRetryTask: Task<Void, Never>?
+    /// the daily goals for the watch to celebrate (VoidOS 2.4.0+)
+    @ObservationIgnored private var goals: [Int]?
+    @ObservationIgnored private var goalsSent: [Int]?
+    /// ops of the CTRL writes waiting for their response, oldest first
+    @ObservationIgnored private var ctrlOps: [UInt8] = []
 
     private static let idKey = "watchID"
     private static let syncKey = "lastSync"
@@ -194,6 +199,8 @@ final class WatchLink: NSObject {
         encRetryTask?.cancel()
         encRetryTask = nil
         encRetries = 0
+        goalsSent = nil
+        ctrlOps = []
     }
 
     private func didConnect(_ p: CBPeripheral) {
@@ -210,8 +217,9 @@ final class WatchLink: NSObject {
         guard let p = peripheral, let info, let ctrl = ctrlChr, dataSubscribed, !sentSend else { return }
         sentSend = true
         let from = cursor.start(info: info, phoneLast: store.last(log: info.logID))
-        p.writeValue(Data(HistoryControl.send(from: from)), for: ctrl, type: .withResponse)
+        writeCtrl(HistoryControl.send(from: from), p, ctrl)
         sendAck()                         // saved last time, ack lost on the way
+        sendGoalsIfReady()
         if cursor.upToDate {
             markSynced()
         } else {
@@ -260,7 +268,7 @@ final class WatchLink: NSObject {
     private func sendAck() {
         guard let p = peripheral, p.state == .connected, let ctrl = ctrlChr,
               let seq = cursor.takeAck() else { return }
-        p.writeValue(Data(HistoryControl.ack(through: seq)), for: ctrl, type: .withResponse)
+        writeCtrl(HistoryControl.ack(through: seq), p, ctrl)
         if let c = infoChr {
             // re-read so the watch status shows what is still waiting
             Task { [weak self] in
@@ -269,6 +277,27 @@ final class WatchLink: NSObject {
                 p.readValue(for: c)
             }
         }
+    }
+
+    private func writeCtrl(_ cmd: [UInt8], _ p: CBPeripheral, _ ctrl: CBCharacteristic) {
+        ctrlOps.append(cmd[0])
+        p.writeValue(Data(cmd), for: ctrl, type: .withResponse)
+    }
+
+    // MARK: goals
+
+    /// Tell the watch the daily goals it celebrates. Sent once per
+    /// connection, and again whenever they change.
+    func setGoals(steps: Int, waterML: Int) {
+        goals = [steps, waterML]
+        sendGoalsIfReady()
+    }
+
+    private func sendGoalsIfReady() {
+        guard let goals, goals != goalsSent, let p = peripheral, p.state == .connected,
+              let ctrl = ctrlChr, sentSend else { return }
+        goalsSent = goals
+        writeCtrl(HistoryControl.goals(steps: goals[0], waterML: goals[1]), p, ctrl)
     }
 
     // MARK: delegate handlers (always on the main queue)
@@ -437,10 +466,17 @@ final class WatchLink: NSObject {
     }
 
     fileprivate func handleWrite(_ c: CBCharacteristic, error: Error?) {
-        if let error, c.uuid == histCtrl {
-            lastError = "The watch refused a sync command: \(error.localizedDescription)"
-            sentSend = false
+        guard c.uuid == histCtrl else { return }
+        let op = ctrlOps.isEmpty ? nil : ctrlOps.removeFirst()
+        guard let error else { return }
+        if op == HistoryControl.goalsOp {
+            // firmware before 2.4.0 doesn't know the goals: not a sync
+            // problem. Try again on the next sync.
+            goalsSent = nil
+            return
         }
+        lastError = "The watch refused a sync command: \(error.localizedDescription)"
+        sentSend = false
     }
 }
 

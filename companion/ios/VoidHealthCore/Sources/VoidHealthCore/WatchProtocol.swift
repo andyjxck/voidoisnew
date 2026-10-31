@@ -57,6 +57,15 @@ public enum HistoryControl {
     public static func send(from seq: UInt32) -> [UInt8] { cmd(1, seq) }
     public static func ack(through seq: UInt32) -> [UInt8] { cmd(2, seq) }
     public static func stop() -> [UInt8] { cmd(3, 0) }
+    /// VoidOS 2.4.0+: the daily goals the watch celebrates. Steps in bits
+    /// 0-15, water (ml) in bits 16-31. Older firmware answers "request not
+    /// supported", which the app ignores.
+    public static func goals(steps: Int, waterML: Int) -> [UInt8] {
+        let s = UInt32(min(max(steps, 0), 0xFFFF))
+        let w = UInt32(min(max(waterML, 0), 0xFFFF))
+        return cmd(goalsOp, s | w << 16)
+    }
+    public static let goalsOp: UInt8 = 4
 
     static func cmd(_ op: UInt8, _ v: UInt32) -> [UInt8] {
         var o: [UInt8] = [op, 0, 0, 0, 0]

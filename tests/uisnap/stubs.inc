@@ -58,6 +58,7 @@ int ble_connected(void) { return snap_ble; }
 void ble_set_enabled(int on) { (void)on; }
 int ble_status(void) { return 2; }
 int ble_dfu_busy(void) { return 0; }
+int hist_ble_take_goals(uint32_t *v) { (void)v; return 0; }
 void ble_link_diag(int *a, int *b, int *c, int *d, int *e)
 { *a = *b = *c = *d = *e = 0; }
 /* 2.2.3: the two settings sectors (0x3F0000, 0x3F1000) are kept in RAM

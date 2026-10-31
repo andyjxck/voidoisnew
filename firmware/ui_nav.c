@@ -9,6 +9,8 @@
 #include "ui_deco.h"
 #include "phone.h"
 #include "daily.h"
+#include "goal.h"
+#include <stddef.h>
 
 #if defined(VOIDOS_DEVICE) && __has_include("gen/version.h")
 #include "gen/version.h"         /* generated from the Makefile's VERSION */
@@ -180,6 +182,12 @@ struct persist {
     uint8_t ver;
     uint8_t brightness, dnd, airplane, water_lock, bt_on;
     uint8_t cc_hide, water_q, alarm_on;   /* water_q: 250 ml units (<=2.2.1) */
+    /* 2.4.0: daily goals from the phone (goal.h), in what was struct
+       padding before steps_total: zero in every older record, which
+       reads as the default. The layout and ver stay the same, so an
+       older build still loads this record. */
+    uint8_t goal_water_q;        /* 50 ml units, 0 = default */
+    uint16_t goal_steps;         /* 0 = default */
     uint32_t steps_total, chip_at_save;
     uint8_t alarm_h, alarm_m;
     uint16_t last_sleep_min, last_workout_min;
@@ -198,7 +206,13 @@ struct persist {
     struct daily dl;
     uint32_t sleep_day;          /* yyyymmdd the last sleep ended */
 };
+/* the goal fields must stay in the old padding (see above) */
+_Static_assert(offsetof(struct persist, steps_total) == 16,
+               "persist layout moved");
 static struct persist P;
+/* 2.4.0 daily goals, as stored (goal.h): 0 = default */
+static uint16_t goal_steps_v;
+static uint8_t goal_water_qv;
 /* live daily counters: water, resting HR, today's step base */
 static struct daily DL;
 static uint32_t sleep_day;
@@ -277,6 +291,8 @@ static void persist_save_x(int sync)
     P.cc_hide = (uint8_t)((cc_hide & 0x7F) |
                           (alerts_on ? 0 : CC_ALERTS_OFF_BIT));
     P.water_q = (uint8_t)(DL.water_ml / 250);
+    P.goal_steps = goal_steps_v;
+    P.goal_water_q = goal_water_qv;
     P.alarm_on = (uint8_t)alarm_on;
     P.alarm_h = (uint8_t)alarm_h;
     P.alarm_m = (uint8_t)alarm_m;
@@ -404,6 +420,8 @@ static void persist_load(void)
     if (DL.water_ml > 10000)
         DL.water_ml = 0;
     sleep_day = P.sleep_day;
+    goal_steps_v = P.goal_steps;
+    goal_water_qv = P.goal_water_q;
     brightness = P.brightness;
     dnd_on = P.dnd;
     airplane_on = P.airplane;
@@ -797,12 +815,18 @@ static void dir_nav(int cst_dir, int start_x)
 
 static int chg_visible(void);        /* ui_charge.inc */
 static void chg_hide(void);
+static int goal_visible(void);       /* ui_goal.inc */
+static void goal_hide(void);
 
 int ui_swipe(int cst_dir, int start_x)
 {
     last_swipe_ms = hal_millis();
     if (chg_visible()) {           /* any swipe closes the battery screen */
         chg_hide();
+        return 1;
+    }
+    if (goal_visible()) {          /* and the goal celebration */
+        goal_hide();
         return 1;
     }
     /* the honeycomb is dragged with the finger: horizontal hardware
@@ -1605,6 +1629,8 @@ static void build_s_done(lv_obj_t *r)
 
 /* ---- water ----------------------------------------------------------------- */
 
+static void goal_poke(void);          /* ui_goal.inc */
+
 static void water_cb(lv_event_t *e)
 {
     int w = DL.water_ml +
@@ -1613,6 +1639,7 @@ static void water_cb(lv_event_t *e)
     DL.water_ml = (uint16_t)(w < 0 ? 0 : w > 10000 ? 10000 : w);
     hist_water((int)DL.water_ml - old);
     persist_mark();
+    goal_poke();                  /* celebrate now, not up to 1 s later */
     rebuild();
 }
 
@@ -1628,13 +1655,15 @@ static void build_water(lv_obj_t *r)
     mk_card(r, 20, 70, 200, 94, C_FILL);
     lv_snprintf(buf, sizeof buf, "%d ML", DL.water_ml);
     mk_label_c(r, &kenney24, C_ACCENT, 120, 82, buf);
-    mk_label_c(r, &kenney12, C_MUTED, 120, 118, "GOAL 2000 ML");
+    int wg = goal_water_of(goal_water_qv);       /* 2.4.0: from the app */
+    lv_snprintf(buf, sizeof buf, "GOAL %d ML", wg);
+    mk_label_c(r, &kenney12, C_MUTED, 120, 118, buf);
     lv_obj_t *bar = lv_bar_create(r);
     lv_obj_set_pos(bar, 30, 138);
     lv_obj_set_size(bar, 180, 16);
     lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);   /* display only */
-    lv_bar_set_range(bar, 0, 2000);
-    lv_bar_set_value(bar, DL.water_ml > 2000 ? 2000 : DL.water_ml, LV_ANIM_OFF);
+    lv_bar_set_range(bar, 0, wg);
+    lv_bar_set_value(bar, DL.water_ml > wg ? wg : DL.water_ml, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(bar, C_EDGE, LV_PART_MAIN);
     lv_obj_set_style_bg_color(bar, C_ACCENT, LV_PART_INDICATOR);
     lv_obj_set_style_radius(bar, 0, LV_PART_MAIN);
@@ -3057,6 +3086,7 @@ static void toast_show(const char *txt, uint32_t now)
 }
 
 #include "ui_charge.inc"
+#include "ui_goal.inc"
 #include "ui_hist.inc"
 
 static void toast_tick(uint32_t now)
@@ -3203,6 +3233,8 @@ void ui_tick(void)
             ui_wake();
         else if (chg_visible())
             chg_hide();                   /* closes the battery screen */
+        else if (goal_visible())
+            goal_hide();                  /* and the goal celebration */
         else if (water_lock) {
             /* the button is the way out of water lock */
             wlock_set(0);
@@ -3226,6 +3258,7 @@ void ui_tick(void)
     overlay_tick(now);
     toast_tick(now);
     chg_tick(now);
+    goal_tick(now);
     if (buzz2_at && (int32_t)(now - buzz2_at) >= 0) {
         buzz2_at = 0;
         buzz(35);

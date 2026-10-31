@@ -8,6 +8,7 @@
 
 #include "../../firmware/nimble_port/src/ancs_store.h"
 #include "../../firmware/daily.h"
+#include "../../firmware/goal.h"
 
 static int fails, checks;
 #define CHECK(c, ...)                                                   \
@@ -244,12 +245,63 @@ static void test_daily(void)
     CHECK(daily_have_yesterday(&d), "28 Feb is yesterday on 1 Mar 2027");
 }
 
+/* 2.4.0 goal celebrations: once per goal per day, kept in the saved
+   daily record, cleared at midnight */
+static void test_goals(void)
+{
+    struct daily d;
+    memset(&d, 0, sizeof d);
+    daily_roll(&d, 20261031, 1, 1000);          /* adopt today */
+
+    /* stored goal values: 0 (every pre-2.4.0 record) is the default */
+    CHECK(goal_steps_of(0) == 10000 && goal_water_of(0) == 2000,
+          "zero goals read as the defaults");
+    CHECK(goal_steps_of(8500) == 8500, "step goal 8500 kept");
+    CHECK(goal_steps_of(60000) == 10000 && goal_water_of(251) == 2000,
+          "out-of-range goals read as the defaults");
+    CHECK(goal_steps_store(500) == 1000 && goal_steps_store(99999) == 50000,
+          "phone step goal clamped");
+    CHECK(goal_water_of(goal_water_store(2500)) == 2500, "2500 ml round-trips");
+    CHECK(goal_water_of(goal_water_store(2520)) == 2500, "2520 ml -> 2500");
+    CHECK(goal_water_of(goal_water_store(20000)) == 12500, "water clamped");
+
+    CHECK(goal_due(&d, 20261031, 9999, 10000, 2000) == 0, "below goal");
+    CHECK(goal_due(&d, 20261031, 10000, 10000, 2000) == GOAL_STEPS,
+          "step goal due at exactly the goal");
+    CHECK(goal_due(&d, 0, 20000, 10000, 2000) == 0, "clock unknown: nothing");
+    CHECK(goal_due(&d, 20261101, 20000, 10000, 2000) == 0,
+          "before the roll to a new day: nothing");
+    d.goals_hit |= GOAL_STEPS;
+    CHECK(goal_due(&d, 20261031, 15000, 10000, 2000) == 0,
+          "step goal only once a day");
+    d.water_ml = 2000;
+    CHECK(goal_due(&d, 20261031, 15000, 10000, 2000) == GOAL_WATER,
+          "water goal due on its own");
+    d.goals_hit |= GOAL_WATER;
+    CHECK(goal_due(&d, 20261031, 15000, 10000, 2000) == 0, "both done");
+
+    /* a reboot reloads the same record: still done */
+    struct daily saved = d;
+    CHECK(daily_roll(&saved, 20261031, 1, 0) == 0 &&
+              goal_due(&saved, 20261031, 15000, 10000, 2000) == 0,
+          "still done after a reboot");
+
+    /* midnight clears them */
+    CHECK(daily_roll(&d, 20261101, 1, 0) == 1, "roll to 1 Nov");
+    CHECK(d.goals_hit == 0, "goals_hit cleared at midnight, got %u",
+          (unsigned)d.goals_hit);
+    d.water_ml = 2500;
+    CHECK(goal_due(&d, 20261101, 0, 10000, 2000) == GOAL_WATER,
+          "water due again the next day");
+}
+
 int main(void)
 {
     test_app_names();
     test_text_fold();
     test_store();
     test_daily();
+    test_goals();
     printf("store/daily: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

@@ -1,5 +1,7 @@
 import Foundation
 import Observation
+import UIKit
+import UserNotifications
 import VoidHealthCore
 
 /// App state: the stored records, the wearer's profile and goals, the
@@ -13,9 +15,14 @@ final class AppModel {
             if let data = try? JSONEncoder().encode(profile) {
                 UserDefaults.standard.set(data, forKey: Self.profileKey)
             }
+            link.setGoals(steps: profile.stepGoal, waterML: profile.waterGoalML)
             rebuild()
         }
     }
+    /// goals met and not shown yet; Today plays them one at a time
+    private(set) var goalQueue: [GoalHit] = []
+    @ObservationIgnored private var celebrations = GoalCelebrations()
+    private static let celebrationsKey = "goalCelebrations"
     private(set) var model: HealthModel
     private(set) var recordCount = 0
     private(set) var storeError: String?
@@ -34,6 +41,10 @@ final class AppModel {
             p = saved
         }
         profile = p
+        if let data = UserDefaults.standard.data(forKey: Self.celebrationsKey),
+           let saved = try? JSONDecoder().decode(GoalCelebrations.self, from: data) {
+            celebrations = saved
+        }
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("VoidHealth", isDirectory: true)
         let s: RecordStore
@@ -53,6 +64,7 @@ final class AppModel {
         link = WatchLink(store: s)
         link.onNewRecords = { [weak self] in self?.scheduleRebuild() }
         link.onLiveSteps = { [weak self] in self?.scheduleRebuild() }
+        link.setGoals(steps: p.stepGoal, waterML: p.waterGoalML)
         rebuild()
     }
 
@@ -79,9 +91,33 @@ final class AppModel {
                 if gen == self.generation {
                     self.model = m
                     self.recordCount = records.count
+                    self.checkGoals(m)
                 }
             }
         }
+    }
+
+    // MARK: goal celebrations
+
+    /// queue the goals today's model newly meets (once per goal per day)
+    private func checkGoals(_ m: HealthModel) {
+        let today = m.summary(m.today)
+        let hits = celebrations.take(today: m.today, summary: today, profile: m.profile)
+        guard !hits.isEmpty else { return }
+        if let data = try? JSONEncoder().encode(celebrations) {
+            UserDefaults.standard.set(data, forKey: Self.celebrationsKey)
+        }
+        goalQueue.append(contentsOf: hits)
+        // in the background (a Bluetooth sync), also a notification
+        if UIApplication.shared.applicationState == .background {
+            for h in hits { GoalNotifier.post(h, value: h.goal.value(today)) }
+        }
+    }
+
+    /// the next goal to celebrate on Today; drops any from an earlier day
+    func takeCelebration() -> GoalHit? {
+        goalQueue.removeAll { $0.day != model.today }
+        return goalQueue.isEmpty ? nil : goalQueue.removeFirst()
     }
 
     private func scheduleRebuild() {
@@ -183,5 +219,42 @@ final class AppModel {
             out += c.joined(separator: ",") + "\n"
         }
         return write(out, name: "VoidHealth-records.csv")
+    }
+}
+
+/// Local notifications for goals met while the app is in the background
+/// (the watch syncs in the background over Bluetooth).
+enum GoalNotifier {
+    static let enabledKey = "goalNotifications"
+    static var enabled: Bool { UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? true }
+
+    /// asks once, the first time the app celebrates a goal
+    static func requestIfNeeded() {
+        guard enabled else { return }
+        Task {
+            let c = UNUserNotificationCenter.current()
+            if await c.notificationSettings().authorizationStatus == .notDetermined {
+                _ = try? await c.requestAuthorization(options: [.alert, .sound])
+            }
+        }
+    }
+
+    static func post(_ hit: GoalHit, value: Int) {
+        guard enabled else { return }
+        let content = UNMutableNotificationContent()
+        content.title = hit.goal.title
+        content.body = body(hit.goal, value: value)
+        content.sound = .default
+        let req = UNNotificationRequest(identifier: "goal-\(hit.day)-\(hit.goal.rawValue)",
+                                        content: content, trigger: nil)
+        Task { try? await UNUserNotificationCenter.current().add(req) }
+    }
+
+    static func body(_ goal: DailyGoal, value: Int) -> String {
+        switch goal {
+        case .steps: return "\(value.formatted()) steps today. Nice work!"
+        case .activeMinutes: return "\(value) active minutes today. Keep it up!"
+        case .water: return "\(value.formatted()) ml of water today. Well done!"
+        }
     }
 }

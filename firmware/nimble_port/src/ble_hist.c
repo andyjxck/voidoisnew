@@ -8,7 +8,8 @@
  *  DATA  a3c10002  notify: 1..15 packed 16-byte records (hlog.h), in
  *        seq order, after the phone writes SEND; new records follow live
  *  CTRL  a3c10003  write (encrypted): [op][u32 arg]
- *        0x01 SEND from seq, 0x02 ACK through seq, 0x03 STOP
+ *        0x01 SEND from seq, 0x02 ACK through seq, 0x03 STOP,
+ *        0x04 GOALS (2.4.0): steps in bits 0-15, water ml in bits 16-31
  *
  * The phone acks only what it has saved; the watch then erases those
  * sectors (hlog_poll). Full protocol: companion/PROTOCOL.md. */
@@ -53,6 +54,8 @@ static uint16_t data_handle;
 static volatile uint8_t req_send, req_stop;
 static volatile uint32_t req_from, req_ack;
 static volatile uint8_t req_ack_set;
+static volatile uint32_t req_goals;         /* 2.4.0, CTRL op 4 */
+static volatile uint8_t req_goals_set;
 static uint8_t streaming;
 static uint16_t stream_conn;
 static uint32_t cursor;
@@ -101,6 +104,9 @@ static int hist_access(uint16_t conn, uint16_t attr,
         switch (b[0]) {
         case 1: req_from = v; stream_conn = conn; req_send = 1; break;
         case 2: req_ack = v; req_ack_set = 1; break;
+        /* 2.4.0: daily goals from the app, steps in bits 0-15 and water
+           (ml) in bits 16-31; ui_goal.inc takes them from the UI loop */
+        case 4: req_goals = v; req_goals_set = 1; break;
         case 3: req_stop = 1; break;
         default: return BLE_ATT_ERR_REQ_NOT_SUPPORTED;
         }
@@ -188,4 +194,14 @@ void hist_ble_tick(void)
             return;             /* out of buffers: same records next pass */
         cursor = nx;
     }
+}
+
+/* the goals the phone last wrote, once (ui_goal.inc) */
+int hist_ble_take_goals(uint32_t *v)
+{
+    if (!req_goals_set)
+        return 0;
+    req_goals_set = 0;
+    *v = req_goals;
+    return 1;
 }

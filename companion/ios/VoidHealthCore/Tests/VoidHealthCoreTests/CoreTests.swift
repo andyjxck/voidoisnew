@@ -95,6 +95,9 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(HistoryControl.resumeSeq(phoneLast: 5000, info: i), 511)  // watch log restarted
         XCTAssertEqual(HistoryControl.send(from: 0x0102_0304), [1, 4, 3, 2, 1])
         XCTAssertEqual(HistoryControl.ack(through: 7), [2, 7, 0, 0, 0])
+        // 10000 steps = 0x2710, 2500 ml = 0x09C4
+        XCTAssertEqual(HistoryControl.goals(steps: 10_000, waterML: 2_500), [4, 0x10, 0x27, 0xC4, 0x09])
+        XCTAssertEqual(HistoryControl.goals(steps: 90_000, waterML: -5), [4, 0xFF, 0xFF, 0, 0])
     }
 
     func testCursorFreshPhone() {

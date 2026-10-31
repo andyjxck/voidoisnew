@@ -32,7 +32,8 @@ struct daily {
     uint32_t steps_base;   /* lifetime steps when `day` began */
     uint16_t water_ml;
     uint8_t rest_bpm;      /* lowest resting reading today, 0 = none */
-    uint8_t sleep_day_ok;  /* reserved */
+    uint8_t goals_hit;     /* 2.4.0: goals celebrated today (goal.h);
+                              was a reserved byte, always 0 */
     uint32_t y_day;        /* the last finished day, 0 = none */
     uint32_t y_steps;
     uint16_t y_water;
@@ -105,6 +106,7 @@ static inline int daily_roll(struct daily *dl, uint32_t today, int synced,
     dl->steps_base = lifetime >= 0 ? (uint32_t)lifetime : DAILY_BASE_PENDING;
     dl->water_ml = 0;
     dl->rest_bpm = 0;
+    dl->goals_hit = 0;
     return 1;
 }
 
