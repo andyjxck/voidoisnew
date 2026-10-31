@@ -23,7 +23,7 @@
 #define BONDBLOB_SECTOR   4096u
 #define BONDBLOB_MAGIC    0x314E4256u   /* "VBN1" little-endian */
 #define BONDBLOB_HDR      16u
-#define BONDBLOB_MAX      1024u         /* header + payload */
+#define BONDBLOB_MAX      1536u         /* header + payload; 4 bonds + 16 CCCDs ~ 970 */
 
 struct bondblob_flash {
     int (*read)(uint32_t addr, void *buf, uint32_t len);

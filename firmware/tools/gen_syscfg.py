@@ -128,7 +128,7 @@ overrides = {
     'BLE_FEM_PA': '0',
     'BLE_FEM_LNA': '0',
     'BLE_STORE_MAX_BONDS': '4',
-    'BLE_STORE_MAX_CCCDS': '8',
+    'BLE_STORE_MAX_CCCDS': '16',
     'BLE_GATT_DISC_ALL_SVCS': '0',
     'BLE_GATT_DISC_ALL_CHRS': '1',   # ANCS client: find the 3 chars
     'BLE_GATT_DISC_ALL_DSCS': '1',   # ANCS client: find the CCCDs

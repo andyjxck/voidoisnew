@@ -19,6 +19,24 @@
 #include "host/ble_gatt.h"
 #include "../../hlog.h"
 
+void ble_app_want_security(uint16_t conn);   /* ble_app.c */
+
+/* History is personal data: INFO and CTRL need an encrypted link. NimBLE's
+   own READ_ENC/WRITE_ENC check answers "Insufficient Encryption" when the
+   watch still holds a key for the phone, which is exactly the state after
+   Forget This Device on the iPhone: the phone has no key, so iOS cannot
+   encrypt and just hands the app the error. Answering "Insufficient
+   Authentication" instead makes iOS pair (or encrypt with the key it
+   has), and the watch also sends its own Security Request right away. */
+static int hist_need_enc(uint16_t conn)
+{
+    struct ble_gap_conn_desc d;
+    if (ble_gap_conn_find(conn, &d) == 0 && d.sec_state.encrypted)
+        return 0;
+    ble_app_want_security(conn);
+    return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+}
+
 int ble_connected(void);
 uint16_t ble_conn_handle(void);
 
@@ -50,6 +68,11 @@ static int hist_access(uint16_t conn, uint16_t attr,
 {
     (void)attr;
     int which = (int)(intptr_t)arg;
+    if (which == 1 || which == 3) {
+        int rc = hist_need_enc(conn);
+        if (rc)
+            return rc;
+    }
     if (which == 1 && ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
         struct hlog_info in;
         hlog_get_info(&in);
@@ -93,13 +116,13 @@ static const struct ble_gatt_svc_def hist_svcs[] = {
         .characteristics = (struct ble_gatt_chr_def[]){
             {.uuid = &hist_info_uuid.u, .access_cb = hist_access,
              .arg = (void *)1,
-             .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC},
+             .flags = BLE_GATT_CHR_F_READ},   /* encryption: hist_need_enc */
             {.uuid = &hist_data_uuid.u, .access_cb = hist_access,
              .arg = (void *)2, .val_handle = &data_handle,
              .flags = BLE_GATT_CHR_F_NOTIFY},
             {.uuid = &hist_ctrl_uuid.u, .access_cb = hist_access,
              .arg = (void *)3,
-             .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC},
+             .flags = BLE_GATT_CHR_F_WRITE},  /* encryption: hist_need_enc */
             {0},
         },
     },

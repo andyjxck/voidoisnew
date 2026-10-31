@@ -168,8 +168,10 @@ void spi_flash_write(uint32_t addr, const uint8_t *buf, unsigned len)
         g_flash[addr + i] &= buf[i];   /* NOR: writes can only clear bits */
 }
 
+static unsigned g_erase_count;
 void spi_flash_sector_erase(uint32_t addr)
 {
+    g_erase_count++;
     memset(g_flash + addr, 0xFF, 0x1000);
 }
 
@@ -412,11 +414,75 @@ int main(void)
     /* 6. revision characteristic reads DFU version 8 */
     struct ble_gatt_access_ctxt rd = {BLE_GATT_ACCESS_OP_READ_CHR,
                                       mbuf_new(64)};
-    dfu_access(0, h_rev, &rd, NULL);
+    int rrc = dfu_access(0, h_rev, &rd, NULL);
+    /* 2.3.1: the read returned "Insufficient Resources" alongside the
+       bytes, so phones saw an ATT error and never started the update */
+    CHECK(rrc == 0, "DFU revision read succeeds (no ATT error)");
     uint8_t rev[2] = {0};
     os_mbuf_copydata(rd.om, 0, 2, rev);
     CHECK(rev[0] == 8 && rev[1] == 0, "DFU revision reads 8");
     os_mbuf_free_chain(rd.om);
+
+    /* 7. a START after an abandoned session starts a fresh one */
+    reset_dfu();
+    ble_dfu_init();
+    write_chr(h_ctrl, (const uint8_t *)"\x01\x04", 2);
+    uint8_t sz7[12] = {0};
+    sz7[8] = 0x90; sz7[9] = 0x01;           /* 400 bytes */
+    write_chr(h_pkt, sz7, 12);
+    write_chr(h_ctrl, (const uint8_t *)"\x02\x00", 2);
+    CHECK(dfu_state == ST_INIT, "abandoned session left in INIT");
+    g_notif_len = 0;
+    write_chr(h_ctrl, (const uint8_t *)"\x01\x04", 2);
+    CHECK(dfu_state == ST_START, "new START restarts a stale session");
+    write_chr(h_pkt, sz7, 12);
+    expect_notify(0x10, 0x01, 0x01, "restarted session answers sizes");
+
+    /* 8. reset opcode aborts, answers, and does NOT reboot (on the host a
+       write to SCB_AIRCR would crash this test) */
+    write_chr(h_ctrl, (const uint8_t *)"\x06", 1);
+    expect_notify(0x10, 0x06, 0x01, "reset opcode acknowledged");
+    CHECK(dfu_state == ST_IDLE && !ble_dfu_busy(), "reset opcode aborts session");
+
+    /* 9. disconnect of the DFU link aborts the session */
+    write_chr(h_ctrl, (const uint8_t *)"\x01\x04", 2);
+    CHECK(ble_dfu_busy(), "busy after START");
+    ble_dfu_on_disconnect(7);                /* some other link */
+    CHECK(ble_dfu_busy(), "other link's disconnect ignored");
+    ble_dfu_on_disconnect(0);
+    CHECK(!ble_dfu_busy(), "DFU link disconnect aborts session");
+
+    /* 10. a session nobody drives times out (fast conn params end) */
+    write_chr(h_ctrl, (const uint8_t *)"\x01\x04", 2);
+    ble_dfu_poll(1000);
+    ble_dfu_poll(1000 + DFU_IDLE_ABORT_MS - 1);
+    CHECK(ble_dfu_busy(), "session kept while within timeout");
+    write_chr(h_pkt, sz7, 12);               /* activity */
+    ble_dfu_poll(1000 + DFU_IDLE_ABORT_MS + 5000);
+    CHECK(ble_dfu_busy(), "activity restarts the timeout");
+    ble_dfu_poll(1000 + 2 * DFU_IDLE_ABORT_MS + 5001 + 1000);
+    CHECK(!ble_dfu_busy(), "idle session aborted after timeout");
+
+    /* 11. magic write erases only the trailer, not the whole slot */
+    {
+        reset_dfu();
+        ble_dfu_init();
+        g_erase_count = 0;
+        int st11 = run_dfu(dat, dat_len, img, img_len, 0);
+        CHECK(st11 == ST_VALIDATED, "happy path validates (trailer check)");
+        uint32_t img_end_sec = ((uint32_t)img_len + 0xFFFu) & ~0xFFFu;
+        uint32_t tr = DFU_MAX_SIZE - 0x2000u;
+        CHECK(g_erase_count <= img_end_sec / 0x1000u + 2u,
+              "erases = image sectors + 2 trailer sectors");
+        CHECK(g_flash[DFU_WRITE_OFFSET + img_end_sec + 1] == 0xA5,
+              "gap between image and trailer left alone");
+        int blank = 1;
+        for (uint32_t a = DFU_WRITE_OFFSET + tr; a < DFU_MAGIC_ADDR; a++)
+            if (g_flash[a] != 0xFF) { blank = 0; break; }
+        CHECK(blank, "trailer erased before magic");
+        static const uint8_t mg[4] = {0x77, 0xc2, 0x95, 0xf3};
+        CHECK(memcmp(&g_flash[DFU_MAGIC_ADDR], mg, 4) == 0, "magic written");
+    }
 
     free(dat);
     free(img);

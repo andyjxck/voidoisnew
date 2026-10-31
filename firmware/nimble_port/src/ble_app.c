@@ -74,6 +74,9 @@ static int ble_compat;          /* advertise as "InfiniTime" for InfiniLink */
 uint16_t ble_conn_handle(void) { return conn_handle; }
 void ble_bond_store_init(uint16_t sig);
 void ble_bond_store_poll(uint32_t now, int busy);
+void ble_bond_store_gatt_sync(void);
+void ble_dfu_poll(uint32_t now_ms);
+void ble_dfu_on_disconnect(uint16_t conn);
 int ble_bond_count(void);
 static int d_repeat_pairs;      /* diag: re-pairs accepted */
 static int d_rpa_res = -1;      /* diag: -1 not an RPA, 0 no IRK matched,
@@ -240,6 +243,7 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         d_disc_reason = ev->disconnect.reason;
+        ble_dfu_on_disconnect(ev->disconnect.conn.conn_handle);
         conn_handle = BLE_HS_CONN_HANDLE_NONE;
         sec_pending_at = 0;
         ancs_on_disconnect();
@@ -383,8 +387,29 @@ static void on_sync(void)
     ble_synced = 1;
     ble_hs_id_infer_auto(0, &own_addr_type);
     ble_adv_on = ble_want;
+    /* GATT table is registered now: tell bonded phones if it changed */
+    ble_bond_store_gatt_sync();
     adv_fast_window();
     ble_advertise();
+}
+
+/* A protected characteristic was touched over an unencrypted link (e.g.
+   the iPhone forgot the watch but the watch still holds its key): ask
+   for security now instead of waiting for the connect-time retry, and
+   allow a couple more tries if the earlier ones were used up. */
+void ble_app_want_security(uint16_t conn)
+{
+    static uint32_t last_want;
+    uint32_t now = hal_millis();
+    if (conn != conn_handle || (last_want && now - last_want < 3000))
+        return;
+    last_want = now ? now : 1;
+    uint32_t soon = now + 200;
+    if (!sec_pending_at || sec_pending_at > soon) {
+        if (sec_attempts >= 4)
+            sec_attempts = 2;
+        sec_pending_at = soon;
+    }
 }
 
 static void on_reset(int reason)
@@ -421,11 +446,16 @@ int ble_init(void)
                                    BLE_HS_KEY_DIST_ID_KEY;
     /* bonds in RAM, mirrored to external flash (0x3F3000-0x3F4FFF) so
        they survive a reboot or a flash. The signature ties saved CCCDs
-       to this firmware's GATT table. */
+       to this firmware's GATT table: the version plus the attribute and
+       service counts, so a layout change is caught even without a
+       version bump. A mismatch also makes the watch send Service Changed
+       to every bonded phone (ble_bond_store_gatt_sync). */
     {
         uint16_t sig = 0x5644;
         for (const char *v = VOIDOS_VERSION; *v; v++)
             sig = (uint16_t)(sig * 31u + (uint8_t)*v);
+        sig = (uint16_t)(sig * 31u + ble_hs_max_attrs);
+        sig = (uint16_t)(sig * 31u + ble_hs_max_services);
         ble_bond_store_init(sig);
     }
     ble_up = 1;
@@ -496,6 +526,7 @@ void ble_poll(void)
         phone_svcs_tick(hal_millis());
     }
     hist_ble_tick();
+    ble_dfu_poll(hal_millis());
     /* write changed bonds to flash, never mid-pairing */
     {
         struct ble_gap_conn_desc bd;

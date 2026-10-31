@@ -57,6 +57,24 @@ static int d_ctrl_writes, d_pkt_writes, d_notify_rc = -1;
 static int d_access_calls;        /* every gatt access cb invocation */
 static int d_last_op0 = -1, d_last_op1 = -1, d_last_pkt0 = -1;
 
+/* 2.3.1: a session that the phone abandoned (disconnect, app killed,
+   error) used to leave dfu_state non-idle until the next reboot. That
+   kept the 15-30 ms "DFU" connection interval forever (battery) and made
+   every later START silently ignored, so the next attempt timed out. */
+#define DFU_IDLE_ABORT_MS 30000u
+static volatile int dfu_touched;
+static uint32_t dfu_last_act;
+static uint16_t dfu_conn = 0xFFFF;
+
+static void dfu_abort(void)
+{
+    dfu_state = 0; /* ST_IDLE */
+    buf_len = total_len = app_size = 0;
+    pkt_count = bytes_rx = 0;
+    prn_every = 0;
+    dfu_conn = 0xFFFF;
+}
+
 /* erase 4 KB sectors only just before they're written — keeps the BLE
    callback short so the connection survives the transfer */
 static void dfu_erase_to(uint32_t end)
@@ -98,9 +116,18 @@ static void dfu_flush(void)
     buf_len = 0;
 }
 
+/* MCUBoot trailer (swap status + flags + magic) lives in the last sectors
+   of the slot. Only those need to be blank; the old code erased every
+   sector from the end of the image to the end of the slot inside the BLE
+   callback (up to ~110 erases, several seconds), which outlasted the 4 s
+   supervision timeout and dropped the link right at 100%. */
+#define DFU_TRAILER_ERASE 0x2000u
 static void dfu_write_magic(void)
 {
     const uint32_t magic[4] = {0xf395c277, 0x7fefd260, 0x0f505235, 0x8079b62c};
+    uint32_t t = DFU_MAX_SIZE - DFU_TRAILER_ERASE;
+    if (erased_to < t)
+        erased_to = t; /* the gap after the image is never read */
     dfu_erase_to(DFU_MAX_SIZE);
     spi_flash_write(DFU_MAGIC_ADDR, (const uint8_t *)magic, 16);
 }
@@ -202,8 +229,13 @@ static int dfu_control(uint16_t conn, struct os_mbuf *om)
     d_last_op1 = op1;
     switch (op0) {
     case OP_START:
-        if (dfu_state == ST_IDLE && op1 == 0x04)
+        /* a new START always begins a fresh session, whatever state an
+           earlier, abandoned attempt left behind */
+        if (op1 == 0x04) {
+            dfu_abort();
+            dfu_conn = conn;
             dfu_state = ST_START;
+        }
         break;
     case OP_INIT:
         /* only init-complete (param != 0) gets a response; answering the
@@ -218,15 +250,15 @@ static int dfu_control(uint16_t conn, struct os_mbuf *om)
         prn_every = op1;
         break;
     case OP_SYS_RESET: {
-        /* buttonless flow: the client asks us to reset "into DFU mode".
-           GPREGRET 0xA8 tells the PineTime MCUBoot to boot the recovery
-           firmware — the BLE DFU target the client then reconnects to.
-           (A plain reset lands in InfiniTime proper, where the client's
-           DFU session dies as "waiting".) */
+        /* 2.3.1: abort the session, never reboot. The running OS is the
+           DFU target itself, so there is no "DFU mode" to reset into.
+           DFU apps send this opcode to abort after an error or a cancel;
+           rebooting here killed the link mid-session, so the phone lost
+           the DFU characteristic and the update only ever completed from
+           the bootloader. */
         const uint8_t d[3] = {OP_RESP, OP_SYS_RESET, 1};
+        dfu_abort();
         dfu_notify(conn, d, 3);
-        *(volatile uint32_t *)0x4000051C = 0xA8; /* POWER->GPREGRET */
-        SCB_AIRCR = 0x05FA0004;
         break;
     }
     case OP_REPORT: {
@@ -342,20 +374,45 @@ static int diag_read2(struct os_mbuf *om)
 
 int ble_dfu_busy(void) { return dfu_state != 0; }
 
+/* Main loop: drop a session nobody is driving any more. */
+void ble_dfu_poll(uint32_t now_ms)
+{
+    if (dfu_touched) {
+        dfu_touched = 0;
+        dfu_last_act = now_ms;
+        return;
+    }
+    if (dfu_state != 0 && (uint32_t)(now_ms - dfu_last_act) > DFU_IDLE_ABORT_MS)
+        dfu_abort();
+}
+
+/* The link that ran the session went away: the session is dead. */
+void ble_dfu_on_disconnect(uint16_t conn)
+{
+    if (dfu_state != 0 && (dfu_conn == 0xFFFF || dfu_conn == conn))
+        dfu_abort();
+}
+
 static int dfu_access(uint16_t conn, uint16_t attr,
                       struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     (void)arg;
     if (attr != h_diag && attr != h_diag2)   /* don't count our own probes */
         d_access_calls++;
+    if (attr == h_ctrl || attr == h_pkt)
+        dfu_touched = 1;
     if (attr == h_ctrl)
         return dfu_control(conn, ctxt->om);
     if (attr == h_pkt)
         return dfu_packet(conn, ctxt->om);
     if (attr == h_rev && ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
         const uint16_t rev = 8;
+        /* os_mbuf_append() returns 0 on success. This test was inverted
+           from the first VoidOS release, so every read of the DFU
+           Revision answered "Insufficient Resources" and the phone's DFU
+           library gave up before it ever used the control point. */
         return os_mbuf_append(ctxt->om, &rev, 2)
-                   ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+                   ? BLE_ATT_ERR_INSUFFICIENT_RES : 0;
     }
     if (attr == h_diag && ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)
         return diag_read(ctxt->om);

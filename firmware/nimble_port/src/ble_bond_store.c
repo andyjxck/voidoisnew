@@ -15,6 +15,7 @@
 #include <string.h>
 #include "host/ble_hs.h"
 #include "host/ble_store.h"
+#include "services/gatt/ble_svc_gatt.h"
 #include "board.h"
 #include "bondblob.h"
 
@@ -42,6 +43,9 @@ static uint16_t gatt_sig;
 /* diag */
 static int8_t load_rc = -2;   /* -2 not run, -1 none/invalid, 0 loaded */
 static uint8_t loaded_bonds, saves, save_errs;
+/* Service Changed: pending until on_sync; phones it was queued for */
+static uint8_t gatt_changed, svc_changed_queued;
+#define BLE_STORE_MAX_BONDS_LOCAL MYNEWT_VAL(BLE_STORE_MAX_BONDS)
 
 /* ---- flash ops ---- */
 static int f_read(uint32_t a, void *b, uint32_t n)
@@ -131,6 +135,61 @@ void ble_bond_store_init(uint16_t sig)
     bondblob_walk(blob + BONDBLOB_HDR, (uint32_t)len, load_rec, &c);
     loading = 0;
     load_rc = 0;
+    /* saved by another firmware or GATT layout: phones bonded then still
+       hold the old table in their GATT cache */
+    if (!c.sig_ok)
+        gatt_changed = 1;
+}
+
+/* ---- Service Changed after an update ----
+   iOS caches a bonded watch's GATT table and only rediscovers when the
+   watch indicates Service Changed (0x2A05). iOS subscribes to 0x2A05 once,
+   at bonding, and never again, but the saved CCCDs are dropped whenever
+   the signature changes, so after an update nothing was ever sent: the
+   phone kept the old table (e.g. no history service after 2.2.5 -> 2.3.0)
+   until the user forgot and re-paired the watch.
+   Now, when the signature changed, every bonded phone gets its 0x2A05
+   subscription restored with "value changed" set. NimBLE then sends the
+   indication (range 0x0001-0xFFFF) as soon as that phone's link is
+   encrypted, and clears the flag when the phone confirms it. Called from
+   on_sync, once the GATT table is registered. */
+#define CLT_CFG_F_INDICATE 0x0002   /* BLE_GATTS_CLT_CFG_F_INDICATE */
+
+static int collect_peer(int type, union ble_store_value *v, void *cookie)
+{
+    struct { ble_addr_t a[BLE_STORE_MAX_BONDS_LOCAL]; int n; } *pc = cookie;
+    (void)type;
+    if (pc->n < BLE_STORE_MAX_BONDS_LOCAL)
+        pc->a[pc->n++] = v->sec.peer_addr;
+    return 0;
+}
+
+void ble_bond_store_gatt_sync(void)
+{
+    if (!gatt_changed)
+        return;
+    gatt_changed = 0;
+
+    uint16_t h = 0;
+    if (ble_gatts_find_chr(BLE_UUID16_DECLARE(0x1801),
+                           BLE_UUID16_DECLARE(0x2A05), NULL, &h) != 0 || !h)
+        return;
+
+    struct { ble_addr_t a[BLE_STORE_MAX_BONDS_LOCAL]; int n; } pc = { .n = 0 };
+    ble_store_iterate(BLE_STORE_OBJ_TYPE_PEER_SEC, collect_peer, &pc);
+    for (int i = 0; i < pc.n; i++) {
+        struct ble_store_value_cccd v;
+        memset(&v, 0, sizeof v);
+        v.peer_addr = pc.a[i];
+        v.chr_val_handle = h;
+        v.flags = CLT_CFG_F_INDICATE;
+        v.value_changed = 1;
+        if (ble_store_write_cccd(&v) == 0 && svc_changed_queued < 255)
+            svc_changed_queued++;
+    }
+    /* sets the range the indication carries; also marks any other stored
+       0x2A05 subscription as changed */
+    ble_svc_gatt_changed(0x0001, 0xFFFF);
 }
 
 /* ---- save ---- */
@@ -191,9 +250,11 @@ int ble_bond_count(void)
     return n;
 }
 
-/* diag word: load_rc+2 | loaded<<4 | saves<<8 | errs<<16 */
+/* diag word: load_rc+2 | loaded<<4 | saves<<8 | errs<<16 | dirty<<24 |
+   Service Changed queued (phones, max 7)<<25 */
 int ble_bond_dbg(void)
 {
     return (load_rc + 2) | (loaded_bonds << 4) | (saves << 8) |
-           (save_errs << 16) | (dirty << 24);
+           (save_errs << 16) | (dirty << 24) |
+           ((svc_changed_queued > 7 ? 7 : svc_changed_queued) << 25);
 }
