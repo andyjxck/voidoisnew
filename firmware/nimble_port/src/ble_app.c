@@ -66,6 +66,9 @@ void ams_on_enc_ok(void);
 int ams_on_notify(uint16_t attr_handle, struct os_mbuf *om);
 void ams_tick(void);
 int phone_svcs_init(void);
+int hist_ble_init(void);                /* ble_hist.c: phone history */
+void hist_ble_tick(void);
+void hist_ble_disconnect(void);
 void phone_music_reset(void);
 static int ble_compat;          /* advertise as "InfiniTime" for InfiniLink */
 uint16_t ble_conn_handle(void) { return conn_handle; }
@@ -241,6 +244,7 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
         sec_pending_at = 0;
         ancs_on_disconnect();
         ams_on_disconnect();
+        hist_ble_disconnect();
         phone_music_reset();
         cp_state = 0;
         adv_fast_window();
@@ -400,6 +404,7 @@ int ble_init(void)
     extern void ble_dfu_init(void);
     ble_dfu_init();
     phone_svcs_init();          /* CTS, music, DIS, battery, HR, steps */
+    hist_ble_init();            /* VoidHealth history outbox */
     nimble_mark(11);
     ble_svc_gap_device_name_set(ble_compat ? "InfiniTime" : "VoidOS");
     ble_hs_cfg.sync_cb = on_sync;
@@ -490,6 +495,7 @@ void ble_poll(void)
         extern uint32_t hal_millis(void);
         phone_svcs_tick(hal_millis());
     }
+    hist_ble_tick();
     /* write changed bonds to flash, never mid-pairing */
     {
         struct ble_gap_conn_desc bd;

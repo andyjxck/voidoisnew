@@ -43,6 +43,11 @@ build/test_store_daily: tests/ble/test_store_daily.c firmware/nimble_port/src/an
 	mkdir -p build
 	$(CC) -std=gnu11 -O1 -Wall -Wextra -Wno-unused-function -Ifirmware tests/ble/test_store_daily.c -o $@
 
+# phone history outbox (firmware/hlog.c) on a simulated NOR flash
+build/test_hlog: tests/hlog/test_hlog.c firmware/hlog.c firmware/hlog.h
+	@mkdir -p build
+	$(CC) -std=gnu11 -O1 -Wall -Wextra -Ifirmware tests/hlog/test_hlog.c firmware/hlog.c -o $@
+
 build/test_hr: tests/hr/test_hr.c firmware/sensors.c
 	mkdir -p build
 	$(CC) -std=gnu11 -O1 -w -Iinclude -Icore -Ifirmware tests/hr/test_hr.c -o $@ -lm
@@ -60,7 +65,7 @@ hrcompare: build/test_hr build/test_hr_old
 	./build/test_hr_old | grep '^\['
 	./build/test_hr | grep '^\['
 
-test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/test_ble_units build/test_store_daily build/test_btn build/test_batt
+test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/test_ble_units build/test_store_daily build/test_btn build/test_batt build/test_hlog
 	./build/test_app
 	SDL_VIDEODRIVER=dummy ./build/test_screenshot
 	SDL_VIDEODRIVER=dummy ./build/test_input
@@ -70,6 +75,7 @@ test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu b
 	./build/test_store_daily
 	./build/test_btn
 	./build/test_batt
+	./build/test_hlog
 
 # everything: host tests plus the rendered-screen checks
 check: test uicheck

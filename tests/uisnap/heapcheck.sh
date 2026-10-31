@@ -21,7 +21,7 @@ while [ $N -le $TO ]; do
   for f in lv_tlsf lv_mem_core_builtin; do
     cc $CFLAGS -DVOIDOS_LV_MEM_SIZE=$N -c -o $W/$f.o $FW/vendor/lvgl/src/stdlib/builtin/$f.c
   done
-  cc $CFLAGS -o $W/snap snap.c $FW/ui_face.c $OBJS $W/lv_tlsf.o $W/lv_mem_core_builtin.o \
+  cc $CFLAGS -o $W/snap snap.c $FW/ui_face.c $FW/hlog.c $OBJS $W/lv_tlsf.o $W/lv_mem_core_builtin.o \
      build/gen/kenney_lvgl.o build/gen/assets_data.o -lm
   rm -rf $W/out; mkdir -p $W/out
   if $W/snap $W/out > $W/out.log 2>&1 && \

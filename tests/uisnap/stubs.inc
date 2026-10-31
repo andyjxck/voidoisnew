@@ -16,6 +16,7 @@ int sensors_bpm(void) { return snap_hr_on ? snap_bpm : 0; }
 int sensors_bpm_stale(void) { return snap_hr_on && snap_bpm > 0 && snap_stale; }
 int sensors_hr_on(void) { return snap_hr_on; }
 void sensors_hr_set(int on) { snap_hr_on = on; }
+int sensors_take_move_secs(void) { return 0; }
 int sensors_wrist_raise(void) { return 0; }
 int sensors_raise_wake(void) { return 0; }
 int sensors_ppg(int i, int *y) { *y = 5000 + 3000 * (((i * 7) % 20) > 10 ? 1 : -1); return 1; }

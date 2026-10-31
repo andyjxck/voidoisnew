@@ -21,7 +21,7 @@ DEPFLAGS = -MMD -MP
 LDFLAGS = $(ARCH) -T link.ld -Wl,--gc-sections -Wl,-Map=voidos-app.map \
           -specs=nano.specs -Wl,--no-warn-rwx-segments
 
-VERSION = 2.2.5
+VERSION = 2.3.0
 BIN      = voidos-app.bin
 IMG      = voidos-app-image.bin
 ZIP      = voidos-dfu-$(VERSION).zip
@@ -32,8 +32,8 @@ LVGL_CFLAGS = $(ARCH) -std=gnu11 -Os -g -ffunction-sections -fdata-sections \
               -w -DLV_CONF_INCLUDE_SIMPLE -DLV_USE_OS=LV_OS_NONE -Ivendor -I. $(DEPFLAGS)
 
 OBJS = startup.o main.o syscalls.o hal_sys.o hal_display.o lvgl_port.o \
-       ui_face.o ui_nav.o sensors.o spi_flash.o \
-       nimble_port/src/ble_dfu.o nimble_port/src/ancs.o nimble_port/src/ble_svcs.o nimble_port/src/ams.o \
+       ui_face.o ui_nav.o sensors.o spi_flash.o hlog.o \
+       nimble_port/src/ble_dfu.o nimble_port/src/ancs.o nimble_port/src/ble_svcs.o nimble_port/src/ams.o nimble_port/src/ble_hist.o \
        nimble_port/src/ble_bond_store.o nimble_port/src/bondblob.o \
        gen/kenney_lvgl.o gen/assets_data.o gen/micons.o $(LVGL_OBJS) \
        nimble_port/src/npl_baremetal.o nimble_port/src/glue.o \

@@ -29,6 +29,9 @@ static int16_t ax, ay, az;
 static int32_t base;            /* gravity baseline, mg */
 static int32_t act_delta;       /* last |mag - base|, for raise-to-wake
                                    and the heart-rate motion gate */
+static int32_t mv_peak;         /* moving seconds, for the phone history */
+static uint32_t mv_sec;
+static uint16_t mv_secs;
 static int armed = 1;
 static uint32_t last_step_ms;
 
@@ -195,6 +198,16 @@ static void bma_sample(uint32_t now)
     act_delta = delta < 0 ? -delta : delta;
     if (delta < 60)
         armed = 1;
+    /* phone history: count the seconds with any real movement (a swing
+       of 60 mg or more), for activity minutes and restless sleep */
+    if (act_delta > mv_peak)
+        mv_peak = act_delta;
+    if (now - mv_sec >= 1000) {
+        mv_sec = now;
+        if (mv_peak >= 60 && mv_secs < 0xFFFF)
+            mv_secs++;
+        mv_peak = 0;
+    }
 
     /* two counters run side by side: the Bosch engine (when its blob
        uploaded) and our crude delta counter. If the engine's feature
@@ -839,6 +852,13 @@ int sensors_hr_on(void) { return hr_on; }
 int sensors_bma_ok(void)  { return bma_ok; }
 int sensors_bma_z(void)   { return bma_ok ? az : 0; }
 int sensors_bma_activity(void) { return bma_ok ? (int)act_delta : 0; }
+/* moving seconds since the last call (hlog 5-minute samples) */
+int sensors_take_move_secs(void)
+{
+    int n = mv_secs;
+    mv_secs = 0;
+    return n;
+}
 
 /* asin in degrees: 1024 counts = 1 g, clamp like the reference impl */
 static float wake_asin(int32_t v)

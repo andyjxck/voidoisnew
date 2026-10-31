@@ -118,6 +118,13 @@ void spi_flash_read(uint32_t, uint8_t *, unsigned);
 void spi_flash_write(uint32_t, const uint8_t *, unsigned);
 void spi_flash_sector_erase(uint32_t);
 int sensors_steps(void);
+/* phone history recording, ui_hist.inc */
+static void hist_init(void);
+static void hist_tick(uint32_t now);
+static void hist_day(void);
+static void hist_water(int delta);
+static void hist_workout_end(void);
+static void hist_sleep_end(void);
 int sensors_wrist_raise(void);
 int sensors_raise_wake(void);
 int sensors_ppg(int i, int *out_y100);
@@ -1440,6 +1447,7 @@ static void workout_cb(lv_event_t *e)
                     w_paused_total;
         w_last_sets = w_sets;
         w_active = 0;
+        hist_workout_end();
         persist_mark();
         nav_sp = 0;             /* summary returns to the face */
         nav_to(SCR_W_DONE);
@@ -1451,6 +1459,7 @@ static void workout_cb(lv_event_t *e)
                 w_last_ms = now - w_start_ms - w_paused_total;
                 w_last_sets = w_sets;
                 w_active = 0;
+                hist_workout_end();
                 persist_mark();
                 nav_sp = 0;
                 nav_to(SCR_W_DONE);
@@ -1546,6 +1555,7 @@ static void sleep_cb(lv_event_t *e)
     if (s_in_bed) {
         s_last_ms = hal_millis() - s_start_ms;
         s_in_bed = 0;
+        hist_sleep_end();
         sleep_day = today_key();
         persist_mark();
         nav_sp = 0;
@@ -1599,7 +1609,9 @@ static void water_cb(lv_event_t *e)
 {
     int w = DL.water_ml +
             (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    int old = DL.water_ml;
     DL.water_ml = (uint16_t)(w < 0 ? 0 : w > 10000 ? 10000 : w);
+    hist_water((int)DL.water_ml - old);
     persist_mark();
     rebuild();
 }
@@ -3045,6 +3057,7 @@ static void toast_show(const char *txt, uint32_t now)
 }
 
 #include "ui_charge.inc"
+#include "ui_hist.inc"
 
 static void toast_tick(uint32_t now)
 {
@@ -3126,6 +3139,7 @@ void ui_init(void)
     /* no LV_EVENT_GESTURE or CLICKED handler: the CST816S detects
        gestures in hardware (ui_swipe) and taps never navigate */
     persist_load();
+    hist_init();
     apply_radio();
     display_backlight(3);
     last_input_ms = hal_millis();
@@ -3271,6 +3285,7 @@ void ui_tick(void)
         if (now - day_chk >= 1000 || !day_chk) {
             day_chk = now ? now : 1;
             if (daily_roll(&DL, today_key(), hal_clock_synced(), ui_steps())) {
+                hist_day();
                 persist_save();
                 if (cur == SCR_FACE || cur == SCR_STATS || cur == SCR_WATER ||
                     cur == SCR_CARDIO)
@@ -3278,6 +3293,7 @@ void ui_tick(void)
             }
         }
     }
+    hist_tick(now);
     /* alarm: once per matching minute, buzz in 500 ms pulses until STOP */
     /* a restored clock rings too: a late alarm beats a missed one */
     if ((alarm_on || alarm_snooze_mod >= 0) &&
