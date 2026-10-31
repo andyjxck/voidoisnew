@@ -65,6 +65,8 @@ final class WatchLink: NSObject {
     @ObservationIgnored private var sentSend = false
     @ObservationIgnored private var cursor = SyncCursor()
     @ObservationIgnored private var ackTask: Task<Void, Never>?
+    @ObservationIgnored private var encRetries = 0
+    @ObservationIgnored private var encRetryTask: Task<Void, Never>?
 
     private static let idKey = "watchID"
     private static let syncKey = "lastSync"
@@ -189,6 +191,9 @@ final class WatchLink: NSObject {
         sentSend = false
         ackTask?.cancel()
         ackTask = nil
+        encRetryTask?.cancel()
+        encRetryTask = nil
+        encRetries = 0
     }
 
     private func didConnect(_ p: CBPeripheral) {
@@ -357,9 +362,32 @@ final class WatchLink: NSObject {
         }
     }
 
+    /// The first encrypted read on a new connection fails while iOS pairs
+    /// (or re-encrypts) with the watch. iOS starts that pairing itself; we
+    /// just try again once it has had time to finish.
+    private func isEncryptionError(_ error: Error) -> Bool {
+        guard let e = error as? CBATTError else { return false }
+        return e.code == .insufficientEncryption || e.code == .insufficientAuthentication
+            || e.code == .insufficientEncryptionKeySize
+    }
+
+    private func retryAfterPairing(_ c: CBCharacteristic) -> Bool {
+        guard encRetries < 10, let p = peripheral, p.state == .connected else { return false }
+        encRetries += 1
+        encRetryTask?.cancel()
+        encRetryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard let self, !Task.isCancelled, let p = self.peripheral, p.state == .connected else { return }
+            if let d = self.dataChr, !self.dataSubscribed { p.setNotifyValue(true, for: d) }
+            if let i = self.infoChr { self.sentSend = false; p.readValue(for: i) }
+        }
+        return true
+    }
+
     fileprivate func handleNotifyState(_ c: CBCharacteristic, error: Error?) {
         guard c.uuid == histData else { return }
         if let error {
+            if isEncryptionError(error), retryAfterPairing(c) { return }
             lastError = "History subscription failed: \(error.localizedDescription)"
             return
         }
@@ -370,10 +398,12 @@ final class WatchLink: NSObject {
     fileprivate func handleValue(_ c: CBCharacteristic, error: Error?) {
         if let error {
             if c.uuid == histInfo {
+                if isEncryptionError(error), retryAfterPairing(c) { return }
                 lastError = "Could not read the watch history: \(error.localizedDescription)"
             }
             return
         }
+        if c.uuid == histInfo { encRetries = 0; lastError = nil }
         guard let v = c.value else { return }
         let bytes = [UInt8](v)
         switch c.uuid {
