@@ -133,7 +133,13 @@ static void hist_tick(uint32_t now);
 static void hist_day(void);
 static void hist_water(int delta);
 static void hist_workout_end(void);
-static void hist_sleep_end(void);
+/* automatic sleep, ui_sleep.inc */
+static void sleep_init(void);
+static void sleep_poll(uint32_t now);
+static void sleep_bed_tap(void);
+static void sleep_wake_tap(void);
+static void sleep_track_off(void);
+static int sleep_auto_open(void);
 int sensors_wrist_raise(void);
 int sensors_raise_wake(void);
 int sensors_ppg(int i, int *out_y100);
@@ -1630,7 +1636,7 @@ static void sleep_cb(lv_event_t *e)
     if (code == 2) {
         s_track ^= 1;
         if (!s_track)
-            s_in_bed = 0;
+            sleep_track_off();  /* 2.4.2: a detected night is kept */
         persist_mark();
         rebuild();
         return;
@@ -1638,16 +1644,13 @@ static void sleep_cb(lv_event_t *e)
     if (!s_track && !s_in_bed)  /* 2.2.3: WAKE UP always ends a night */
         return;
     if (s_in_bed) {
-        s_last_ms = hal_millis() - s_start_ms;
-        s_in_bed = 0;
-        hist_sleep_end();
+        sleep_wake_tap();       /* sets s_last_ms, writes the night */
         sleep_day = today_key();
         persist_mark();
         nav_sp = 0;
         nav_to(SCR_S_DONE);
     } else {
-        s_in_bed = 1;
-        s_start_ms = hal_millis();
+        sleep_bed_tap();
         rebuild();
     }
 }
@@ -1657,7 +1660,8 @@ static void build_sleep(lv_obj_t *r)
     page_bg(r);
     mk_header(r, "SLEEP", 1);
     mk_card(r, 20, 38, 200, 64, s_in_bed ? C_WARN : C_FILL);
-    mk_label_c(r, &kenney12, C_MUTED, 120, 46, s_in_bed ? "IN BED" : "LAST NIGHT");
+    mk_label_c(r, &kenney12, C_MUTED, 120, 46,
+               !s_in_bed ? "LAST NIGHT" : sleep_auto_open() ? "ASLEEP" : "IN BED");
     char buf[24];
     if (s_in_bed)
         fmt_ms(hal_millis() - s_start_ms, buf);
@@ -2281,7 +2285,7 @@ static void st_value(int i, char *v, char *u)
         break;
     case 4:
         if (s_in_bed) {
-            lv_snprintf(v, 16, "IN BED");
+            lv_snprintf(v, 16, sleep_auto_open() ? "ASLEEP" : "IN BED");
             u[0] = 0;
         } else if (s_last_ms) {
             unsigned sm = s_last_ms / 60000;
@@ -3154,6 +3158,7 @@ static void toast_show(const char *txt, uint32_t now)
 #include "ui_goal.inc"
 #include "ui_power.inc"
 #include "ui_hist.inc"
+#include "ui_sleep.inc"
 
 static void toast_tick(uint32_t now)
 {
@@ -3236,6 +3241,7 @@ void ui_init(void)
        gestures in hardware (ui_swipe) and taps never navigate */
     persist_load();
     hist_init();
+    sleep_init();
     apply_radio();
     display_backlight(3);
     last_input_ms = hal_millis();
@@ -3402,6 +3408,7 @@ void ui_tick(void)
         }
     }
     hist_tick(now);
+    sleep_poll(now);
     /* alarm: once per matching minute, buzz in 500 ms pulses until STOP */
     /* 2.4.1: only on a clock it can trust, once a day (alarm.h). A
        restored clock is wound back to the last save, which made the

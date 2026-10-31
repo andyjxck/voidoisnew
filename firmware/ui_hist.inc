@@ -1,12 +1,15 @@
 /* ---- phone history (included by ui_nav.c) ----------------------------------
  * Records what the watch measures into the hlog outbox (hlog.h) for the
  * VoidHealth phone app: a sample every 5 minutes (steps, heart rate,
- * movement, battery), each water tap, each workout and night, and the
+ * movement, battery), each water tap, each workout, and the
  * day totals at midnight. Nothing is recorded while the clock is unknown:
  * a record the phone cannot place in time is no use to it. */
 #include "hlog.h"
 
 int sensors_take_move_secs(void);
+/* automatic sleep, ui_sleep.inc: fed every closed slot */
+static void sleep_slot(uint32_t t, int steps, int mv, uint32_t bpm, int chg,
+                       uint8_t flag);
 
 static void hl_read(uint32_t a, uint8_t *b, unsigned n) { spi_flash_read(a, b, n); }
 static void hl_write(uint32_t a, const uint8_t *b, unsigned n) { spi_flash_write(a, b, n); }
@@ -19,6 +22,7 @@ static int hs_steps0;                 /* ui_steps() when it opened */
 static uint32_t hs_bpm_sum;
 static uint16_t hs_bpm_n;
 static uint8_t hs_bpm_max, hs_flag;
+static uint8_t hs_chg;                /* on the charger at any time in the slot */
 static uint32_t hw_sum;               /* heart rate during the workout */
 static uint16_t hw_n;
 static uint8_t hw_max, hw_on;
@@ -54,6 +58,7 @@ static void hist_open_slot(uint32_t slot, uint8_t flag)
     hs_bpm_sum = 0;
     hs_bpm_n = 0;
     hs_bpm_max = 0;
+    hs_chg = 0;
     (void)sensors_take_move_secs();
 }
 
@@ -73,6 +78,7 @@ static void hist_close_slot(void)
                  (uint32_t)(batt | (hal_on_charger() ? 0x80 : 0)) << 16 |
                  (uint32_t)mv << 24;
     hlog_append(hs_slot * 300u, (uint8_t)(HREC_SAMPLE | hs_flag), (uint16_t)d, b);
+    sleep_slot(hs_slot * 300u, d, mv, avg, hs_chg || hal_on_charger(), hs_flag);
 }
 
 /* every ui_tick */
@@ -83,6 +89,8 @@ static void hist_tick(uint32_t now)
     if (now - last < 1000 && last)
         return;
     last = now ? now : 1;
+    if (hal_on_charger())
+        hs_chg = 1;
     int bpm = sensors_bpm();
     if (bpm > 0 && bpm < 255 && !sensors_bpm_stale()) {
         hs_bpm_sum += (uint32_t)bpm;
@@ -162,13 +170,4 @@ static void hist_workout_end(void)
                 sets | routine << 8 | avg << 16 | max << 24);
 }
 
-/* call after s_last_ms is set */
-static void hist_sleep_end(void)
-{
-    uint8_t flag;
-    uint32_t t = hist_now(&flag);
-    uint32_t secs = s_last_ms / 1000u;
-    if (t && secs)
-        hlog_append(t > secs ? t - secs : t, (uint8_t)(HREC_SLEEP | flag), 0,
-                    secs);
-}
+/* nights are written by ui_sleep.inc (sleep_log) */

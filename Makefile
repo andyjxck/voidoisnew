@@ -48,6 +48,11 @@ build/test_alarm: tests/test_alarm.c firmware/alarm.h
 	@mkdir -p build
 	$(CC) -std=gnu11 -O1 -Wall -Wextra -Ifirmware tests/test_alarm.c -o $@
 
+# 2.4.2: automatic sleep detection on synthetic nights, and its journal
+build/test_sleep: tests/test_sleep.c firmware/sleepdet.h
+	@mkdir -p build
+	$(CC) -std=gnu11 -O1 -Wall -Wextra -Ifirmware tests/test_sleep.c -o $@
+
 # phone history outbox (firmware/hlog.c) on a simulated NOR flash
 build/test_hlog: tests/hlog/test_hlog.c firmware/hlog.c firmware/hlog.h
 	@mkdir -p build
@@ -70,7 +75,7 @@ hrcompare: build/test_hr build/test_hr_old
 	./build/test_hr_old | grep '^\['
 	./build/test_hr | grep '^\['
 
-test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/test_ble_units build/test_store_daily build/test_btn build/test_batt build/test_hlog build/test_alarm
+test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/test_ble_units build/test_store_daily build/test_btn build/test_batt build/test_hlog build/test_alarm build/test_sleep
 	./build/test_app
 	SDL_VIDEODRIVER=dummy ./build/test_screenshot
 	SDL_VIDEODRIVER=dummy ./build/test_input
@@ -82,6 +87,7 @@ test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu b
 	./build/test_batt
 	./build/test_hlog
 	./build/test_alarm
+	./build/test_sleep
 
 # everything: host tests plus the rendered-screen checks
 check: test uicheck

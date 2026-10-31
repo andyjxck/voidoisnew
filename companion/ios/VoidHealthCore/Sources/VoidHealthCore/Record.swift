@@ -93,8 +93,14 @@ public struct WatchRecord: Hashable, Codable, Sendable {
     public var workoutAvgBPM: Int { Int((b >> 16) & 0xFF) }
     public var workoutMaxBPM: Int { Int(b >> 24) }
 
-    /// sleep (t = bedtime)
+    /// sleep (t = bedtime, or when sleep began for a detected night)
     public var secondsInBed: Int { Int(b) }
+    /// sleep: how the night was found (VoidOS 2.4.2). Bit 0 detected
+    /// automatically, bit 1 nap, bits 4-15 minutes awake inside it.
+    /// 0 for a BEDTIME / WAKE UP night and for older firmware.
+    public var sleepAuto: Bool { a & 0x1 != 0 }
+    public var sleepNap: Bool { a & 0x2 != 0 }
+    public var sleepAwakeMinutes: Int { Int(a >> 4) }
 
     /// day totals (t = local midnight)
     public var dayWater: Int { Int(a) }
