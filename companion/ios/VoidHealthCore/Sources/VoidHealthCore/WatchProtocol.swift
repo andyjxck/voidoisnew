@@ -12,6 +12,8 @@ public enum WatchUUID {
     public static let batteryLevel = "2A19"
     public static let timeService = "1805"
     public static let currentTime = "2A2B"
+    public static let deviceInfoService = "180A"
+    public static let firmwareRevision = "2A26"
     public static let motionService = "00030000-78FC-48FE-8E23-433B3A1942D0"
     public static let stepCount = "00030001-78FC-48FE-8E23-433B3A1942D0"
     /// names VoidOS advertises (InfiniTime when the compatibility mode is on)
@@ -44,9 +46,11 @@ public struct HistoryInfo: Equatable, Sendable {
     }
 
     /// records still waiting on the watch
-    public var pending: Int { Int(nextSeq) - Int(max(ackedSeq + 1, firstSeq)) }
+    public var pending: Int { max(0, Int(nextSeq) - max(Int(ackedSeq) + 1, Int(firstSeq))) }
     /// share of the watch's outbox in use
-    public var fill: Double { capacity == 0 ? 0 : Double(nextSeq - firstSeq) / Double(capacity) }
+    public var fill: Double {
+        capacity == 0 ? 0 : min(1, Double(max(0, Int(nextSeq) - Int(firstSeq))) / Double(capacity))
+    }
 }
 
 public enum HistoryControl {
@@ -67,6 +71,53 @@ public enum HistoryControl {
             return info.firstSeq
         }
         return last + 1
+    }
+}
+
+/// Where a sync stands: what the phone has saved and what it has told the
+/// watch it may erase. Pure bookkeeping so it can be tested off-device.
+/// Acks only ever move forward, and only cover records already on disk.
+public struct SyncCursor: Equatable, Sendable {
+    public private(set) var highestSaved: UInt32 = 0
+    public private(set) var lastAckSent: UInt32 = 0
+    public private(set) var nextSeq: UInt32 = 0
+
+    public init() {}
+
+    /// a fresh INFO read: returns the seq to SEND from
+    public mutating func start(info: HistoryInfo, phoneLast: UInt32?) -> UInt32 {
+        let from = HistoryControl.resumeSeq(phoneLast: phoneLast, info: info)
+        lastAckSent = info.ackedSeq
+        nextSeq = info.nextSeq
+        highestSaved = from > 0 ? from - 1 : 0
+        // saved here before, but the ack never reached the watch
+        if let held = phoneLast, held < info.nextSeq { highestSaved = max(highestSaved, held) }
+        return from
+    }
+
+    /// records from this log are now on disk
+    public mutating func saved(_ seqs: [UInt32]) {
+        guard let top = seqs.max() else { return }
+        if top > highestSaved { highestSaved = top }
+        if highestSaved >= nextSeq { nextSeq = highestSaved + 1 }
+    }
+
+    /// a later INFO read while connected
+    public mutating func update(_ info: HistoryInfo) {
+        nextSeq = max(nextSeq, info.nextSeq)
+        lastAckSent = max(lastAckSent, info.ackedSeq)
+    }
+
+    public var hasUnacked: Bool { highestSaved > lastAckSent }
+    /// enough waiting that the ack should not wait for the batch to end
+    public var ackIsDue: Bool { hasUnacked && highestSaved - lastAckSent >= 255 }
+    public var upToDate: Bool { highestSaved + 1 >= nextSeq }
+
+    /// the seq to ACK through, or nil when nothing new is saved
+    public mutating func takeAck() -> UInt32? {
+        guard hasUnacked else { return nil }
+        lastAckSent = highestSaved
+        return highestSaved
     }
 }
 

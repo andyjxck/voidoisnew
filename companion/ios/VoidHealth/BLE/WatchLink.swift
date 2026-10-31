@@ -10,27 +10,38 @@ import VoidHealthCore
 /// then ACK the highest saved seq so the watch can erase it. The watch keeps
 /// streaming new records while connected. iOS keeps a pending connect alive
 /// in the background, so the app syncs whenever the watch is in range.
+/// Protocol: companion/PROTOCOL.md.
 @MainActor
 @Observable
 final class WatchLink: NSObject {
     enum Status: Equatable {
-        case bluetoothOff, unauthorized, searching, connecting, syncing, upToDate, needsFirmware
+        case bluetoothOff, unauthorized, unsupported, searching, waiting, connecting, syncing, upToDate, needsFirmware
 
         var text: String {
             switch self {
             case .bluetoothOff: return "Bluetooth is off"
             case .unauthorized: return "Bluetooth permission needed"
+            case .unsupported: return "This device has no Bluetooth LE"
             case .searching: return "Looking for your watch"
+            case .waiting: return "Waiting for your watch"
             case .connecting: return "Connecting"
             case .syncing: return "Syncing"
             case .upToDate: return "Up to date"
             case .needsFirmware: return "Watch needs VoidOS 2.3 or newer"
             }
         }
+
+        var isProblem: Bool {
+            switch self {
+            case .bluetoothOff, .unauthorized, .unsupported, .needsFirmware: return true
+            default: return false
+            }
+        }
     }
 
     private(set) var status: Status = .searching
     private(set) var watchName: String?
+    private(set) var firmware: String?
     private(set) var battery: Int?
     private(set) var liveBPM: Int?
     private(set) var liveSteps: Int?
@@ -38,11 +49,9 @@ final class WatchLink: NSObject {
     private(set) var info: HistoryInfo?
     private(set) var receivedThisSession = 0
     private(set) var lastError: String?
-    private(set) var lastSync: Date? {
-        didSet { UserDefaults.standard.set(lastSync, forKey: "lastSync") }
-    }
-    var isConnected: Bool { peripheral?.state == .connected }
-    var hasWatch: Bool { UserDefaults.standard.string(forKey: Self.idKey) != nil }
+    private(set) var lastSync: Date?
+    private(set) var hasWatch = false
+    var isConnected: Bool { status == .syncing || status == .upToDate || status == .needsFirmware }
 
     @ObservationIgnored var onNewRecords: (() -> Void)?
     @ObservationIgnored var onLiveSteps: (() -> Void)?
@@ -54,28 +63,31 @@ final class WatchLink: NSObject {
     @ObservationIgnored private var ctrlChr: CBCharacteristic?
     @ObservationIgnored private var dataSubscribed = false
     @ObservationIgnored private var sentSend = false
-    @ObservationIgnored private var lastAckSent: UInt32 = 0
-    @ObservationIgnored private var highestSaved: UInt32 = 0
+    @ObservationIgnored private var cursor = SyncCursor()
     @ObservationIgnored private var ackTask: Task<Void, Never>?
 
     private static let idKey = "watchID"
-    private let histService = CBUUID(string: WatchUUID.historyService)
-    private let histInfo = CBUUID(string: WatchUUID.historyInfo)
-    private let histData = CBUUID(string: WatchUUID.historyData)
-    private let histCtrl = CBUUID(string: WatchUUID.historyControl)
-    private let hrService = CBUUID(string: WatchUUID.heartRateService)
-    private let hrMeasure = CBUUID(string: WatchUUID.heartRateMeasurement)
-    private let battService = CBUUID(string: WatchUUID.batteryService)
-    private let battLevel = CBUUID(string: WatchUUID.batteryLevel)
-    private let timeService = CBUUID(string: WatchUUID.timeService)
-    private let currentTime = CBUUID(string: WatchUUID.currentTime)
-    private let motionService = CBUUID(string: WatchUUID.motionService)
-    private let stepCount = CBUUID(string: WatchUUID.stepCount)
+    private static let syncKey = "lastSync"
+    @ObservationIgnored private let histService = CBUUID(string: WatchUUID.historyService)
+    @ObservationIgnored private let histInfo = CBUUID(string: WatchUUID.historyInfo)
+    @ObservationIgnored private let histData = CBUUID(string: WatchUUID.historyData)
+    @ObservationIgnored private let histCtrl = CBUUID(string: WatchUUID.historyControl)
+    @ObservationIgnored private let hrService = CBUUID(string: WatchUUID.heartRateService)
+    @ObservationIgnored private let hrMeasure = CBUUID(string: WatchUUID.heartRateMeasurement)
+    @ObservationIgnored private let battService = CBUUID(string: WatchUUID.batteryService)
+    @ObservationIgnored private let battLevel = CBUUID(string: WatchUUID.batteryLevel)
+    @ObservationIgnored private let timeService = CBUUID(string: WatchUUID.timeService)
+    @ObservationIgnored private let currentTime = CBUUID(string: WatchUUID.currentTime)
+    @ObservationIgnored private let disService = CBUUID(string: WatchUUID.deviceInfoService)
+    @ObservationIgnored private let fwRevision = CBUUID(string: WatchUUID.firmwareRevision)
+    @ObservationIgnored private let motionService = CBUUID(string: WatchUUID.motionService)
+    @ObservationIgnored private let stepCount = CBUUID(string: WatchUUID.stepCount)
 
     init(store: RecordStore) {
         self.store = store
         super.init()
-        lastSync = UserDefaults.standard.object(forKey: "lastSync") as? Date
+        lastSync = UserDefaults.standard.object(forKey: Self.syncKey) as? Date
+        hasWatch = UserDefaults.standard.string(forKey: Self.idKey) != nil
         central = CBCentralManager(delegate: self, queue: .main, options: [
             CBCentralManagerOptionRestoreIdentifierKey: "VoidHealthCentral",
             CBCentralManagerOptionShowPowerAlertKey: true,
@@ -84,37 +96,56 @@ final class WatchLink: NSObject {
 
     // MARK: actions
 
-    /// app came to the foreground: refresh and pull anything new
+    /// app came to the foreground or the user pulled to refresh
     func refresh() {
         guard central.state == .poweredOn else { return }
-        guard let p = peripheral, p.state == .connected else {
+        guard let p = peripheral, p.state == .connected, infoChr != nil else {
             reconnect()
             return
         }
+        sentSend = false                 // the INFO reply starts a new SEND
         if let c = infoChr { p.readValue(for: c) }
-        sentSend = false
+        if let c = battChr { p.readValue(for: c) }
     }
 
     /// drop the saved watch and look for one again
     func forgetWatch() {
         UserDefaults.standard.removeObject(forKey: Self.idKey)
-        if let p = peripheral { central.cancelPeripheralConnection(p) }
+        hasWatch = false
+        let old = peripheral
         peripheral = nil
+        if let old { central.cancelPeripheralConnection(old) }
         watchName = nil
+        firmware = nil
+        battery = nil
         info = nil
+        liveBPM = nil
         reset()
         reconnect()
     }
 
+    @ObservationIgnored private var battChr: CBCharacteristic?
+
     private func reconnect() {
         guard central.state == .poweredOn else { return }
-        if let p = peripheral, p.state == .connected || p.state == .connecting { return }
+        if let p = peripheral {
+            switch p.state {
+            case .connected:
+                if infoChr == nil && dataChr == nil { didConnect(p) }   // restored by iOS, not set up yet
+                return
+            case .connecting:
+                return
+            default:
+                connect(p)
+                return
+            }
+        }
         if let s = UserDefaults.standard.string(forKey: Self.idKey), let id = UUID(uuidString: s),
            let p = central.retrievePeripherals(withIdentifiers: [id]).first {
             connect(p)
             return
         }
-        // the watch is often already connected to the iPhone (notifications)
+        // the watch is usually already connected to the iPhone for notifications
         let linked = central.retrieveConnectedPeripherals(withServices: [histService])
             + central.retrieveConnectedPeripherals(withServices: [hrService]).filter { Self.looksLikeWatch($0.name) }
         if let p = linked.first {
@@ -123,7 +154,9 @@ final class WatchLink: NSObject {
         }
         status = .searching
         if !central.isScanning {
-            central.scanForPeripherals(withServices: [hrService], options: nil)
+            // VoidOS advertises its name and the ANCS solicitation, not a
+            // service list, so scan for everything and match the name
+            central.scanForPeripherals(withServices: nil, options: nil)
         }
     }
 
@@ -138,6 +171,7 @@ final class WatchLink: NSObject {
         p.delegate = self
         watchName = p.name ?? watchName
         UserDefaults.standard.set(p.identifier.uuidString, forKey: Self.idKey)
+        hasWatch = true
         if p.state == .connected {
             didConnect(p)
         } else {
@@ -150,16 +184,19 @@ final class WatchLink: NSObject {
         infoChr = nil
         dataChr = nil
         ctrlChr = nil
+        battChr = nil
         dataSubscribed = false
         sentSend = false
         ackTask?.cancel()
+        ackTask = nil
     }
 
     private func didConnect(_ p: CBPeripheral) {
         reset()
         status = .connecting
+        receivedThisSession = 0
         watchName = p.name ?? watchName
-        p.discoverServices([histService, hrService, battService, timeService, motionService])
+        p.discoverServices([histService, hrService, battService, timeService, disService, motionService])
     }
 
     // MARK: history sync
@@ -167,19 +204,11 @@ final class WatchLink: NSObject {
     private func startSyncIfReady() {
         guard let p = peripheral, let info, let ctrl = ctrlChr, dataSubscribed, !sentSend else { return }
         sentSend = true
-        let held = store.last(log: info.logID)
-        let from = HistoryControl.resumeSeq(phoneLast: held, info: info)
-        lastAckSent = info.ackedSeq
-        highestSaved = from > 0 ? from - 1 : 0
+        let from = cursor.start(info: info, phoneLast: store.last(log: info.logID))
         p.writeValue(Data(HistoryControl.send(from: from)), for: ctrl, type: .withResponse)
-        // saved here before but the ack never reached the watch
-        if let held, held > info.ackedSeq, held < info.nextSeq {
-            highestSaved = max(highestSaved, held)
-            sendAck()
-        }
-        if from >= info.nextSeq {
-            status = .upToDate
-            lastSync = Date()
+        sendAck()                         // saved last time, ack lost on the way
+        if cursor.upToDate {
+            markSynced()
         } else {
             status = .syncing
         }
@@ -192,10 +221,9 @@ final class WatchLink: NSObject {
         do {
             let fresh = try store.add(recs, log: info.logID)
             receivedThisSession += fresh.count
-            if let top = recs.map(\.seq).max(), top > highestSaved { highestSaved = top }
-            if highestSaved + 1 > info.nextSeq { self.info?.nextSeq = highestSaved + 1 }
+            cursor.saved(recs.map(\.seq))
             if !fresh.isEmpty { onNewRecords?() }
-            if highestSaved - lastAckSent >= 255 {
+            if cursor.ackIsDue {
                 sendAck()
             } else {
                 ackTask?.cancel()
@@ -205,9 +233,10 @@ final class WatchLink: NSObject {
                     self?.sendAck()
                 }
             }
-            if highestSaved + 1 >= (self.info?.nextSeq ?? 0) {
-                status = .upToDate
-                lastSync = Date()
+            if cursor.upToDate {
+                markSynced()
+            } else {
+                status = .syncing
             }
             lastError = nil
         } catch {
@@ -216,14 +245,23 @@ final class WatchLink: NSObject {
         }
     }
 
+    private func markSynced() {
+        status = .upToDate
+        let now = Date()
+        lastSync = now
+        UserDefaults.standard.set(now, forKey: Self.syncKey)
+    }
+
     private func sendAck() {
-        guard let p = peripheral, let ctrl = ctrlChr, highestSaved > lastAckSent else { return }
-        p.writeValue(Data(HistoryControl.ack(through: highestSaved)), for: ctrl, type: .withResponse)
-        lastAckSent = highestSaved
+        guard let p = peripheral, p.state == .connected, let ctrl = ctrlChr,
+              let seq = cursor.takeAck() else { return }
+        p.writeValue(Data(HistoryControl.ack(through: seq)), for: ctrl, type: .withResponse)
         if let c = infoChr {
+            // re-read so the watch status shows what is still waiting
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(2))
-                self?.peripheral?.readValue(for: c)
+                guard let self, let p = self.peripheral, p.state == .connected else { return }
+                p.readValue(for: c)
             }
         }
     }
@@ -234,19 +272,24 @@ final class WatchLink: NSObject {
         switch state {
         case .poweredOn: reconnect()
         case .unauthorized: status = .unauthorized
-        default: status = .bluetoothOff
+        case .unsupported: status = .unsupported
+        default:
+            status = .bluetoothOff
+            reset()
         }
     }
 
     fileprivate func handleRestore(_ peripherals: [CBPeripheral]) {
-        if let p = peripherals.first {
+        let saved = UserDefaults.standard.string(forKey: Self.idKey)
+        if let p = peripherals.first(where: { $0.identifier.uuidString == saved }) ?? peripherals.first {
             peripheral = p
             p.delegate = self
+            watchName = p.name ?? watchName
         }
     }
 
     fileprivate func handleDiscover(_ p: CBPeripheral, name: String?) {
-        guard Self.looksLikeWatch(name ?? p.name) else { return }
+        guard peripheral == nil, Self.looksLikeWatch(name ?? p.name) else { return }
         connect(p)
     }
 
@@ -259,11 +302,17 @@ final class WatchLink: NSObject {
         guard p == peripheral else { return }
         reset()
         liveBPM = nil
-        status = .connecting
-        central.connect(p, options: nil)          // reconnect when back in range
+        status = .waiting
+        if central.state == .poweredOn {
+            central.connect(p, options: nil)      // reconnect when back in range
+        }
     }
 
-    fileprivate func handleServices(_ p: CBPeripheral) {
+    fileprivate func handleServices(_ p: CBPeripheral, error: Error?) {
+        if let error {
+            lastError = "Could not read the watch's services: \(error.localizedDescription)"
+            return
+        }
         let services = p.services ?? []
         if !services.contains(where: { $0.uuid == histService }) { status = .needsFirmware }
         for s in services {
@@ -272,6 +321,7 @@ final class WatchLink: NSObject {
             case hrService: p.discoverCharacteristics([hrMeasure], for: s)
             case battService: p.discoverCharacteristics([battLevel], for: s)
             case timeService: p.discoverCharacteristics([currentTime], for: s)
+            case disService: p.discoverCharacteristics([fwRevision], for: s)
             case motionService: p.discoverCharacteristics([stepCount], for: s)
             default: break
             }
@@ -283,7 +333,7 @@ final class WatchLink: NSObject {
             switch c.uuid {
             case histInfo:
                 infoChr = c
-                p.readValue(for: c)
+                p.readValue(for: c)                // encrypted: uses the iPhone's bond with the watch
             case histData:
                 dataChr = c
                 p.setNotifyValue(true, for: c)
@@ -292,8 +342,11 @@ final class WatchLink: NSObject {
             case hrMeasure:
                 p.setNotifyValue(true, for: c)
             case battLevel, stepCount:
+                if c.uuid == battLevel { battChr = c }
                 p.readValue(for: c)
                 if c.properties.contains(.notify) { p.setNotifyValue(true, for: c) }
+            case fwRevision:
+                p.readValue(for: c)
             case currentTime:
                 // keep the watch clock right; the watch only takes it from a bonded phone
                 if c.properties.contains(.write) {
@@ -315,17 +368,24 @@ final class WatchLink: NSObject {
     }
 
     fileprivate func handleValue(_ c: CBCharacteristic, error: Error?) {
-        guard error == nil, let v = c.value else {
-            if let error, c.uuid == histInfo {
+        if let error {
+            if c.uuid == histInfo {
                 lastError = "Could not read the watch history: \(error.localizedDescription)"
             }
             return
         }
+        guard let v = c.value else { return }
         let bytes = [UInt8](v)
         switch c.uuid {
         case histInfo:
-            if let i = HistoryInfo(bytes) {
-                info = i
+            guard let i = HistoryInfo(bytes) else {
+                status = .needsFirmware
+                return
+            }
+            info = i
+            if sentSend {
+                cursor.update(i)
+            } else {
                 startSyncIfReady()
             }
         case histData:
@@ -334,6 +394,8 @@ final class WatchLink: NSObject {
             if let b = WatchValues.heartRate(bytes) { liveBPM = b > 0 ? b : nil }
         case battLevel:
             battery = bytes.first.map(Int.init)
+        case fwRevision:
+            firmware = String(decoding: bytes, as: UTF8.self)
         case stepCount:
             if let s = WatchValues.steps(bytes) {
                 liveSteps = s
@@ -386,7 +448,7 @@ extension WatchLink: CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        MainActor.assumeIsolated { handleServices(peripheral) }
+        MainActor.assumeIsolated { handleServices(peripheral, error: error) }
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService,

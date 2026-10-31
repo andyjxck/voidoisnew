@@ -97,6 +97,44 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(HistoryControl.ack(through: 7), [2, 7, 0, 0, 0])
     }
 
+    func testCursorFreshPhone() {
+        // a new install (or erased history) while the watch still holds
+        // acknowledged records it has not erased yet: seq 511...600
+        let i = info(first: 511, next: 801, acked: 600)
+        var c = SyncCursor()
+        XCTAssertEqual(c.start(info: i, phoneLast: nil), 511)
+        XCTAssertFalse(c.hasUnacked)
+        XCTAssertFalse(c.ackIsDue)                     // used to underflow here
+        XCTAssertNil(c.takeAck())
+        c.saved(Array(511...600))
+        XCTAssertNil(c.takeAck())                      // nothing past the watch's own ack yet
+        c.saved(Array(601...700))
+        XCTAssertFalse(c.upToDate)
+        XCTAssertEqual(c.takeAck(), 700)
+        XCTAssertNil(c.takeAck())
+        c.saved(Array(701...800))
+        XCTAssertTrue(c.upToDate)
+        XCTAssertEqual(c.takeAck(), 800)
+        c.saved([801])                                 // a live record past the INFO read
+        XCTAssertTrue(c.upToDate)
+        XCTAssertEqual(c.takeAck(), 801)
+    }
+
+    func testCursorResumeAndLostAck() {
+        let i = info(first: 511, next: 801, acked: 600)
+        var c = SyncCursor()
+        // the phone saved through 700 last time but the ack was lost
+        XCTAssertEqual(c.start(info: i, phoneLast: 700), 701)
+        XCTAssertEqual(c.takeAck(), 700)
+        c.saved(Array(701...956))
+        XCTAssertTrue(c.ackIsDue)
+        XCTAssertEqual(c.takeAck(), 956)
+        var d = SyncCursor()
+        XCTAssertEqual(d.start(info: i, phoneLast: 800), 801)
+        XCTAssertTrue(d.upToDate)
+        XCTAssertEqual(d.takeAck(), 800)
+    }
+
     func testCurrentTime() {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(identifier: "Europe/London")!
@@ -215,6 +253,16 @@ final class ModelTests: XCTestCase {
         let year = m.series(.sleep, span: .year, page: 0, cal: cal)
         XCTAssertEqual(year.count, 12)
         XCTAssertFalse(m.personalBests(cal: cal).isEmpty)
+    }
+
+    func testFutureOnlyRecordsDoNotCrash() {
+        // a watch clock set far ahead: every record is after "today"
+        let rs = [sample(4000, 3600, steps: 900, bpm: 80), rec(4000, 0, 5, a: 500, b: 12000)]
+        let m = HealthModel.build(records: rs, profile: profile, today: 3000, nowSecond: 3600)
+        XCTAssertEqual(m.firstDay, 4000)
+        XCTAssertEqual(m.streak(.steps).longest, 0)
+        XCTAssertTrue(m.insights(cal: DayCalendar()).isEmpty)
+        _ = m.personalBests(cal: DayCalendar())
     }
 
     func testAYearOfData() {

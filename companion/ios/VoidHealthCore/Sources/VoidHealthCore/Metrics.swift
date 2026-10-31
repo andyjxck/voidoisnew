@@ -300,7 +300,7 @@ extension HealthModel {
     /// consecutive days meeting the goal; today counts once it is met, and
     /// an unfinished today does not break the run
     public func streak(_ metric: Metric) -> Streak {
-        guard let goal = metric.goal(profile), let first = firstDay else { return Streak() }
+        guard let goal = metric.goal(profile), let first = firstDay, first <= today else { return Streak() }
         var s = Streak()
         var run = 0
         for day in first...today {

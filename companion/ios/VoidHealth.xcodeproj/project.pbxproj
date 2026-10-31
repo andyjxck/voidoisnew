@@ -1,0 +1,452 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		05C7C4DB8EA358E576413422 /* TodayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45CB79BB10C197C6D5EC6C61 /* TodayView.swift */; };
+		1C5F99A4AADA9CD0025843E7 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3EF4C14E310982ADB81BA331 /* Assets.xcassets */; };
+		1C7945D1E302AA0AC0BE2C53 /* WatchLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63F185F729D5AF101266DC7 /* WatchLink.swift */; };
+		35FA3F72DF0D526FAA18BE29 /* YouView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A01B0104A1343662567E5E60 /* YouView.swift */; };
+		68CB5A6367CD585DF1178342 /* VoidHealthApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6351134AFC8A1EB67D521DA /* VoidHealthApp.swift */; };
+		6B854E6A2E2BCC14DEB30A9A /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15651CAF9B814D566254E075 /* AppModel.swift */; };
+		79CD5F53795B002B026FBBA7 /* TrendsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2654CCA3B5857B4B92A92F85 /* TrendsView.swift */; };
+		869F470DB45DB0A2453CD1B1 /* MetricCharts.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4EDA2F90690B0445BBCD9A0 /* MetricCharts.swift */; };
+		B9DBDFB66C021A46799A1DB9 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 142696C8778038DA5296CBF9 /* PrivacyInfo.xcprivacy */; };
+		C04B805A5EE47625BA42E4CC /* VoidHealthCore in Frameworks */ = {isa = PBXBuildFile; productRef = 65B6FC4504F55EA006AE1167 /* VoidHealthCore */; };
+		C16D3BC8E4F3169F1545C856 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27714C86C45A25FEA9BE6F61 /* Theme.swift */; };
+		F256E524582881A91A283D98 /* SleepView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68236FAFC8A9777ED2CA0585 /* SleepView.swift */; };
+		F2A9CFA8E66A70A4A3181F2C /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4F9F9EDA60D5CEE2210DB54 /* Components.swift */; };
+		F8AF0428541A731D09F366B5 /* MetricDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D0C253CAF05E9C393EFD2E3 /* MetricDetailView.swift */; };
+		FCBDDF6AE8A260FFF03DCC59 /* WorkoutsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A995016FF0D146871275994 /* WorkoutsView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		01811CE7ED73DDDA0786062C /* VoidHealth.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = VoidHealth.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		142696C8778038DA5296CBF9 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		15651CAF9B814D566254E075 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		2654CCA3B5857B4B92A92F85 /* TrendsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrendsView.swift; sourceTree = "<group>"; };
+		27714C86C45A25FEA9BE6F61 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		3EF4C14E310982ADB81BA331 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		45CB79BB10C197C6D5EC6C61 /* TodayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TodayView.swift; sourceTree = "<group>"; };
+		5D0C253CAF05E9C393EFD2E3 /* MetricDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricDetailView.swift; sourceTree = "<group>"; };
+		68236FAFC8A9777ED2CA0585 /* SleepView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SleepView.swift; sourceTree = "<group>"; };
+		7A995016FF0D146871275994 /* WorkoutsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkoutsView.swift; sourceTree = "<group>"; };
+		A01B0104A1343662567E5E60 /* YouView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YouView.swift; sourceTree = "<group>"; };
+		C6351134AFC8A1EB67D521DA /* VoidHealthApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoidHealthApp.swift; sourceTree = "<group>"; };
+		E4F9F9EDA60D5CEE2210DB54 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
+		E63F185F729D5AF101266DC7 /* WatchLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchLink.swift; sourceTree = "<group>"; };
+		F2CDB6FA89C3BC9AA8B036A1 /* VoidHealthCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = VoidHealthCore; path = VoidHealthCore; sourceTree = SOURCE_ROOT; };
+		F4EDA2F90690B0445BBCD9A0 /* MetricCharts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricCharts.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		5F5FB0299F23F8D259974806 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C04B805A5EE47625BA42E4CC /* VoidHealthCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		09E75F21B68D8DEF9BE7251F /* App */ = {
+			isa = PBXGroup;
+			children = (
+				15651CAF9B814D566254E075 /* AppModel.swift */,
+				C6351134AFC8A1EB67D521DA /* VoidHealthApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		3C525936670BEC10D6F578D0 /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				E4F9F9EDA60D5CEE2210DB54 /* Components.swift */,
+				F4EDA2F90690B0445BBCD9A0 /* MetricCharts.swift */,
+				27714C86C45A25FEA9BE6F61 /* Theme.swift */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+		73059B4B9FB85F41B004E5F5 /* BLE */ = {
+			isa = PBXGroup;
+			children = (
+				E63F185F729D5AF101266DC7 /* WatchLink.swift */,
+			);
+			path = BLE;
+			sourceTree = "<group>";
+		};
+		B63DDE3BB170B1C29388B96E = {
+			isa = PBXGroup;
+			children = (
+				FF9BC520DBD5D44AFECB28AC /* Packages */,
+				E850EE8CB8F3072C968CA313 /* VoidHealth */,
+				BD2523861C918D5D7B796734 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		BD2523861C918D5D7B796734 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				01811CE7ED73DDDA0786062C /* VoidHealth.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		E80D895CC7D944F43D9326AB /* Screens */ = {
+			isa = PBXGroup;
+			children = (
+				5D0C253CAF05E9C393EFD2E3 /* MetricDetailView.swift */,
+				68236FAFC8A9777ED2CA0585 /* SleepView.swift */,
+				45CB79BB10C197C6D5EC6C61 /* TodayView.swift */,
+				2654CCA3B5857B4B92A92F85 /* TrendsView.swift */,
+				7A995016FF0D146871275994 /* WorkoutsView.swift */,
+				A01B0104A1343662567E5E60 /* YouView.swift */,
+			);
+			path = Screens;
+			sourceTree = "<group>";
+		};
+		E850EE8CB8F3072C968CA313 /* VoidHealth */ = {
+			isa = PBXGroup;
+			children = (
+				09E75F21B68D8DEF9BE7251F /* App */,
+				73059B4B9FB85F41B004E5F5 /* BLE */,
+				F3BBEE635FFF74E24AD9DB8A /* Resources */,
+				E80D895CC7D944F43D9326AB /* Screens */,
+				3C525936670BEC10D6F578D0 /* UI */,
+			);
+			path = VoidHealth;
+			sourceTree = "<group>";
+		};
+		F3BBEE635FFF74E24AD9DB8A /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				3EF4C14E310982ADB81BA331 /* Assets.xcassets */,
+				142696C8778038DA5296CBF9 /* PrivacyInfo.xcprivacy */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		FF9BC520DBD5D44AFECB28AC /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				F2CDB6FA89C3BC9AA8B036A1 /* VoidHealthCore */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		74C7B007CD787528F54B874B /* VoidHealth */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E17F080C116AE0566715394A /* Build configuration list for PBXNativeTarget "VoidHealth" */;
+			buildPhases = (
+				9A58166834EF68D71E3FDE55 /* Sources */,
+				349FEC841451BD5D03D14197 /* Resources */,
+				5F5FB0299F23F8D259974806 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = VoidHealth;
+			packageProductDependencies = (
+				65B6FC4504F55EA006AE1167 /* VoidHealthCore */,
+			);
+			productName = VoidHealth;
+			productReference = 01811CE7ED73DDDA0786062C /* VoidHealth.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		DCDED71E1A7356A27296FFF8 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					74C7B007CD787528F54B874B = {
+						DevelopmentTeam = T963633DC5;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = EA8F830645D366777CBB22A0 /* Build configuration list for PBXProject "VoidHealth" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = B63DDE3BB170B1C29388B96E;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				04C1490A6E9E1935AA947DA4 /* XCLocalSwiftPackageReference "VoidHealthCore" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = BD2523861C918D5D7B796734 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				74C7B007CD787528F54B874B /* VoidHealth */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		349FEC841451BD5D03D14197 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1C5F99A4AADA9CD0025843E7 /* Assets.xcassets in Resources */,
+				B9DBDFB66C021A46799A1DB9 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		9A58166834EF68D71E3FDE55 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6B854E6A2E2BCC14DEB30A9A /* AppModel.swift in Sources */,
+				F2A9CFA8E66A70A4A3181F2C /* Components.swift in Sources */,
+				869F470DB45DB0A2453CD1B1 /* MetricCharts.swift in Sources */,
+				F8AF0428541A731D09F366B5 /* MetricDetailView.swift in Sources */,
+				F256E524582881A91A283D98 /* SleepView.swift in Sources */,
+				C16D3BC8E4F3169F1545C856 /* Theme.swift in Sources */,
+				05C7C4DB8EA358E576413422 /* TodayView.swift in Sources */,
+				79CD5F53795B002B026FBBA7 /* TrendsView.swift in Sources */,
+				68CB5A6367CD585DF1178342 /* VoidHealthApp.swift in Sources */,
+				1C7945D1E302AA0AC0BE2C53 /* WatchLink.swift in Sources */,
+				FCBDDF6AE8A260FFF03DCC59 /* WorkoutsView.swift in Sources */,
+				35FA3F72DF0D526FAA18BE29 /* YouView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		4B6A9034DA6E49976FD7464E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_PREVIEWS = YES;
+				INFOPLIST_FILE = VoidHealth/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.andysocial.voidhealth;
+				PRODUCT_NAME = VoidHealth;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_STRICT_CONCURRENCY = minimal;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		900FF909BC2E2F0ECA7B3BED /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = T963633DC5;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		C141F9AF7015FD0AFF441BC6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = T963633DC5;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		EDDCD50DC0DFB22A09508ACE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_PREVIEWS = YES;
+				INFOPLIST_FILE = VoidHealth/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.andysocial.voidhealth;
+				PRODUCT_NAME = VoidHealth;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_STRICT_CONCURRENCY = minimal;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		E17F080C116AE0566715394A /* Build configuration list for PBXNativeTarget "VoidHealth" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EDDCD50DC0DFB22A09508ACE /* Debug */,
+				4B6A9034DA6E49976FD7464E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		EA8F830645D366777CBB22A0 /* Build configuration list for PBXProject "VoidHealth" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C141F9AF7015FD0AFF441BC6 /* Debug */,
+				900FF909BC2E2F0ECA7B3BED /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		04C1490A6E9E1935AA947DA4 /* XCLocalSwiftPackageReference "VoidHealthCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = VoidHealthCore;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		65B6FC4504F55EA006AE1167 /* VoidHealthCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = VoidHealthCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = DCDED71E1A7356A27296FFF8 /* Project object */;
+}
