@@ -145,7 +145,10 @@ static void chg_tick(uint32_t now)
     if (now - raw_since >= CHG_DEBOUNCE && raw != stable) {
         int was = stable;
         stable = raw;
-        if (was == 0 && raw == 1 && !alarm_ringing && !timer_done) {
+        /* 2.4.1: also when the watch starts up already on the charger
+           (a flat battery boots on the cable, and so does a restart on
+           the dock). Before, a boot on the charger showed nothing. */
+        if (was != 1 && raw == 1 && !alarm_ringing && !timer_done) {
             if (asleep)
                 ui_wake();
             else
@@ -155,7 +158,6 @@ static void chg_tick(uint32_t now)
         } else if (was == 1 && raw == 0) {
             chg_hide();
         }
-        /* (was == -1: boot, already plugged or not: no screen) */
     }
     if (!chg_visible())
         return;

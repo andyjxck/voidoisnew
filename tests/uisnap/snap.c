@@ -959,6 +959,80 @@ int main(int argc, char **argv)
         DL.water_ml = 750; shot(dir, SCR_WATER, "49_water_goal_2500");
         goal_water_qv = 0;
     }
+    {   /* 2.4.1: battery % top right, music controls while linked */
+        extern int snap_batt_pct, snap_on_charger, snap_charging;
+        extern int ui_face_music_shown(void);
+        extern const char *ui_face_batt_text(void);
+        snap_ble = 0;
+        shot(dir, SCR_FACE, "50_face_unlinked");
+        finding(!ui_face_music_shown() ? 0 : 1,
+                "no music controls without the phone");
+        finding(strcmp(ui_face_batt_text(), "81%") == 0 ? 0 : 1,
+                "battery %% shows without the phone (%s)",
+                ui_face_batt_text());
+        snap_ble = 1;
+        shot(dir, SCR_FACE, "51_face_linked_idle");
+        finding(ui_face_music_shown() ? 0 : 1,
+                "music controls show when linked, nothing playing");
+        snap_batt_pct = 100;
+        shot(dir, SCR_FACE, "52_face_batt_100");
+        snap_batt_pct = 14;
+        shot(dir, SCR_FACE, "53_face_batt_low");
+        snap_batt_pct = 47; snap_on_charger = 1; snap_charging = 1;
+        shot(dir, SCR_FACE, "54_face_batt_charging");
+        face_dig = 0; shot(dir, SCR_FACE, "55_analog_batt_charging"); face_dig = 1;
+        snap_batt_pct = 81; snap_on_charger = 0; snap_charging = 0;
+    }
+    {   /* 2.4.1: charging screen on the real plug-in path (chg_tick),
+           including a boot already on the charger */
+        extern int snap_on_charger, snap_charging;
+        cur_name = "charge-edge"; fprintf(stderr, "SECTION charge-edge\n");
+        cur = SCR_FACE; rebuild(); settle();
+        snap_on_charger = 1; snap_charging = 1;
+        asleep = 1;
+        uint32_t t0 = hal_millis();
+        chg_tick(t0);
+        chg_tick(t0 + 300);
+        finding(chg_visible() && !asleep ? 0 : 1,
+                "boot on the charger: wakes and shows the charging screen");
+        chg_hide();
+        snap_on_charger = 0;
+        chg_tick(t0 + 400);
+        chg_tick(t0 + 700);
+        asleep = 1;
+        snap_on_charger = 1;
+        chg_tick(t0 + 800);
+        chg_tick(t0 + 1100);
+        finding(chg_visible() && !asleep ? 0 : 1,
+                "plugged in while asleep: wakes and shows the charging screen");
+        chg_hide();
+        snap_on_charger = 0; snap_charging = 0;
+        chg_tick(t0 + 1200);
+        chg_tick(t0 + 1500);
+    }
+    {   /* 2.4.1: power menu on a 3 s hold */
+        cur_name = "power"; fprintf(stderr, "SECTION power\n");
+        cur = SCR_FACE; rebuild(); settle();
+        { lv_mem_monitor_t mm; lv_mem_monitor(&mm); fprintf(stderr, "P1 free %u big %u used %u%%\n", (unsigned)mm.free_size, (unsigned)mm.free_biggest_size, mm.used_pct); }
+        uint32_t t0 = hal_millis();
+        finding(pm_tick(t0, 2900) == 0 && !pm_visible() ? 0 : 1,
+                "no power menu before 3 s");
+        finding(pm_tick(t0 + 100, 3000) && pm_visible() ? 0 : 1,
+                "power menu opens at a 3 s hold");
+        finding(pm_tick(t0 + 200, 0) == 1 ? 0 : 1,
+                "letting go of the hold is not also a button press");
+        finding(pm_tick(t0 + 300, 0) == 0 ? 0 : 1,
+                "the next press is a normal press again");
+        { lv_mem_monitor_t mm; lv_mem_monitor(&mm); fprintf(stderr, "P2 free %u big %u used %u%%\n", (unsigned)mm.free_size, (unsigned)mm.free_biggest_size, mm.used_pct); }
+        lv_obj_invalidate(pm_box);
+        settle(); save(dir, "56_power_menu");
+        fprintf(stderr, "P3\n");
+        ui_swipe(1, 120);
+        finding(pm_visible() ? 0 : 1, "a swipe doesn't close the power menu");
+        pm_tick(t0 + 300 + PM_SHOW_MS + 1, 0);
+        finding(!pm_visible() ? 0 : 1, "power menu closes after 10 s idle");
+        asleep = 0;
+    }
     cur_name = "";
     printf("wrote screens to %s; tap/text audit: %d checks, %d failed\n",
            dir, checks, fails);

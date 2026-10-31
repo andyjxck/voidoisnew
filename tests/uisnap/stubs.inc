@@ -2,7 +2,8 @@ static uint32_t now_ms = 100000;
 static int snap_bpm = 72, snap_hr_on = 1, snap_stale = 0;
 uint32_t hal_millis_raw(void) { return now_ms; }
 uint32_t hal_millis(void) { return now_ms; }
-void fault_blink(int p) { fprintf(stderr, "LVGL assert (fault_blink %d)\n", p); abort(); }
+#include <execinfo.h>
+void fault_blink(int p) { void *bt[32]; int n = backtrace(bt, 32); fprintf(stderr, "LVGL assert (fault_blink %d)\n", p); backtrace_symbols_fd(bt, n, 2); abort(); }
 void display_backlight(int l) { (void)l; }
 void display_sleep(int on) { (void)on; }
 void touch_sleep(int on) { (void)on; }
@@ -41,6 +42,11 @@ void hal_clock_date(int *y, int *mo, int *d, int *dow)
 static int snap_synced = 1, snap_restored;
 int hal_clock_synced(void) { return snap_synced; }
 int hal_clock_restored(void) { return snap_restored; }
+int hal_clock_state(void) { return snap_synced ? 1 : snap_restored ? 2 : 0; }
+void hal_clock_restore_fresh(int y, int mo, int d, int dow, int h, int mi, int s)
+{ (void)y; (void)mo; (void)d; (void)dow; (void)h; (void)mi; (void)s; }
+void hal_power_off(void) {}
+void hal_system_reset(void) {}
 void hal_clock_restore(int y, int mo, int d, int dow, int h, int mi, int s)
 { (void)y; (void)mo; (void)d; (void)dow; (void)h; (void)mi; (void)s; }
 uint32_t hal_clock_tod_ms(void) { return 630u * 60000u; }

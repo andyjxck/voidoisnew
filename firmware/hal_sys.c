@@ -216,8 +216,12 @@ int hal_clock_millis(void) { return (int)(wall_ms() % 1000u); }
    2 restored from the last save. A restored clock is behind by however
    long the watch was off or being flashed, so it is NOT "synced": the
    face shows it as pending and alarms wait for a real sync. */
+/* 2.4.1: 3 = restored from a save made just before a deliberate restart
+   (power menu or long hold): only seconds behind, so the alarm may ring
+   on it (alarm.h). It still shows as pending until the phone syncs. */
 int hal_clock_synced(void) { return clock_valid == 1; }
-int hal_clock_restored(void) { return clock_valid == 2; }
+int hal_clock_restored(void) { return clock_valid == 2 || clock_valid == 3; }
+int hal_clock_state(void) { return clock_valid; }
 uint32_t hal_clock_tod_ms(void) { return wall_ms(); }
 
 void hal_clock_set(int y, int mo, int d, int dow, int h, int mi, int s)
@@ -243,6 +247,16 @@ void hal_clock_restore(int y, int mo, int d, int dow, int h, int mi, int s)
         return;
     hal_clock_set(y, mo, d, dow, h, mi, s);
     clock_valid = 2;
+}
+
+/* 2.4.1: the clock saved at a deliberate restart a few seconds ago */
+void hal_clock_restore_fresh(int y, int mo, int d, int dow, int h, int mi,
+                             int s)
+{
+    if (clock_valid == 1)
+        return;
+    hal_clock_set(y, mo, d, dow, h, mi, s);
+    clock_valid = 3;
 }
 
 /* Sakamoto's algorithm: weekday from Y/M/D, returns 1=Mon .. 7=Sun.
@@ -920,3 +934,42 @@ void hal_boot_confirm(void)
 }
 
 int hal_poll_event(hal_event_t *ev) { (void)ev; return 0; }
+
+/* ---- power menu (2.4.1, ui_power.inc) ------------------------------------ */
+
+void display_sleep(int on);
+void spi_flash_deep_sleep(void);
+void sensors_power_off(void);
+
+void hal_system_reset(void)
+{
+    SCB_AIRCR = 0x05FA0004;
+    for (;;)
+        ;
+}
+
+/* System OFF: everything stops but the GPIO sense logic. The side button
+   (PIN_BTN_IN, sense-high since boot, powered by PIN_BTN_OUT which keeps
+   its level) wakes it, and waking from System OFF is a reset: the watch
+   boots through the bootloader as from power-on. */
+#define POWER_SYSTEMOFF REG32(0x40000500)
+void hal_power_off(void)
+{
+    hal_motor(0);
+    display_backlight(0);
+    display_sleep(1);
+    touch_sleep(1);
+    sensors_power_off();
+    spi_flash_deep_sleep();
+    /* a button still down when System OFF starts would wake it at once */
+    while (GPIO_IN & BIT(PIN_BTN_IN))
+        wdt_kick();
+    delay_ms(30, 0);
+    /* only the button wakes it: no sense on the touch interrupt */
+    GPIO_PIN_CNF(PIN_TP_INT) = 0;
+    GPIO_LATCH = 0xFFFFFFFFu;
+    __asm__ volatile("dsb");
+    POWER_SYSTEMOFF = 1u;
+    for (;;)
+        __asm__ volatile("wfe");
+}

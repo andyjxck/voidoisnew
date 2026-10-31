@@ -10,6 +10,7 @@
 #include "phone.h"
 #include "daily.h"
 #include "goal.h"
+#include "alarm.h"
 #include <stddef.h>
 
 #if defined(VOIDOS_DEVICE) && __has_include("gen/version.h")
@@ -99,6 +100,9 @@ static int alarm_on = 1;
 static int alarm_h = 7, alarm_m = 0;
 static int alarm_ringing;
 static int alarm_fired_min = -1;    /* minute-of-day already fired */
+/* 2.4.1: alarm_day_num() of the day the main alarm last rang (saved,
+   alarm.h), so a restart inside the alarm minute doesn't ring it again */
+static uint16_t alarm_rang_day;
 
 /* watchface style: 0 = analogue, 1 = digital (concept art) */
 static int face_dig = 1;
@@ -111,7 +115,10 @@ static scr_t back_target = SCR_FACE;
    however long the watch was off or flashing. The face says so until a
    phone sync or a manual SET TIME. */
 int hal_clock_restored(void);
+int hal_clock_state(void);
 void hal_clock_restore(int y, int mo, int d, int dow, int h, int mi, int s);
+void hal_clock_restore_fresh(int y, int mo, int d, int dow, int h, int mi,
+                             int s);
 int ui_clock_stale(void) { return hal_clock_restored(); }
 
 /* ---- persistence: settings + step history on external SPI flash ---- */
@@ -201,6 +208,10 @@ struct persist {
     uint8_t face_dig;
     uint8_t hr_on;
     uint8_t compat;              /* 2.1: advertise as InfiniTime */
+    /* 2.4.1: in what was padding before dl (zero in older records, which
+       reads as "never"): the day the alarm last rang (alarm.h) */
+    uint8_t pad41;
+    uint16_t alarm_rang_day;
     /* 2.2.2 (ver 6): the day the daily counters belong to, the
        counters, and the last finished day's totals */
     struct daily dl;
@@ -208,6 +219,9 @@ struct persist {
 };
 /* the goal fields must stay in the old padding (see above) */
 _Static_assert(offsetof(struct persist, steps_total) == 16,
+               "persist layout moved");
+_Static_assert(offsetof(struct persist, dl) == 48 &&
+               offsetof(struct persist, alarm_rang_day) == 46,
                "persist layout moved");
 static struct persist P;
 /* 2.4.0 daily goals, as stored (goal.h): 0 = default */
@@ -250,6 +264,7 @@ int ui_steps(void)
 }
 
 static int persist_dirty;
+static int persist_restarting;      /* 2.4.1: saving for a restart */
 static uint32_t persist_dirty_ms;
 
 /* mark for a deferred write: the 4 KB sector erase stalls the UI and
@@ -296,6 +311,8 @@ static void persist_save_x(int sync)
     P.alarm_on = (uint8_t)alarm_on;
     P.alarm_h = (uint8_t)alarm_h;
     P.alarm_m = (uint8_t)alarm_m;
+    P.alarm_rang_day = alarm_rang_day;
+    P.pad41 = 0;
     P.last_sleep_min = (uint16_t)(s_last_ms / 60000u);
     P.last_workout_min = (uint16_t)(w_last_ms / 60000u);
     P.last_workout_sets = (uint8_t)w_last_sets;
@@ -315,7 +332,10 @@ static void persist_save_x(int sync)
         P.clock_mon = (uint8_t)mo;
         P.clock_day = (uint8_t)d;
         P.clock_dow = (uint8_t)dow;
-        P.clock_ok = 1;
+        /* 2 = written just before a deliberate restart: the next boot
+           may trust it for the alarm (alarm.h). Older builds read any
+           non-zero value as a plain restore. */
+        P.clock_ok = persist_restarting ? 2 : 1;
     }
     struct persist_tail t;
     t.magic = PERSIST_TAIL_MAGIC;
@@ -362,6 +382,31 @@ static void persist_poll(void)
 
 static void persist_save(void)
 {
+    persist_save_x(1);
+}
+
+/* 2.4.1: save everything, the clock marked fresh, right before a
+   deliberate restart (power menu Restart, or the long-hold reset). A
+   background save still erasing is finished first. */
+void ui_save_before_restart(void)
+{
+    while (persist_pending) {
+        if (!spi_flash_busy())
+            persist_poll();
+    }
+    persist_restarting = 1;
+    persist_save_x(1);
+    persist_restarting = 0;
+}
+
+/* 2.4.1: save before power off. The clock is saved as a plain (stale)
+   restore: nobody knows how long the watch will stay off. */
+void ui_save_before_off(void)
+{
+    while (persist_pending) {
+        if (!spi_flash_busy())
+            persist_poll();
+    }
     persist_save_x(1);
 }
 
@@ -436,6 +481,7 @@ static void persist_load(void)
         alarm_h = P.alarm_h;
         alarm_m = P.alarm_m;
     }
+    alarm_rang_day = P.alarm_rang_day;
     s_last_ms = (uint32_t)P.last_sleep_min * 60000u;
     w_last_ms = (uint32_t)P.last_workout_min * 60000u;
     w_last_sets = P.last_workout_sets;
@@ -452,9 +498,21 @@ static void persist_load(void)
        this boot; the phone will correct it on the next sync */
     if (P.clock_ok && P.clock_year >= 2024 && !hal_clock_synced()) {
         uint32_t t = P.clock_tod_ms;
-        hal_clock_restore(P.clock_year, P.clock_mon, P.clock_day,
-                          P.clock_dow, (int)(t / 3600000u),
-                          (int)(t / 60000u % 60u), (int)(t / 1000u % 60u));
+        if (P.clock_ok == 2) {
+            /* saved seconds ago by a deliberate restart: trusted for the
+               alarm. Rewrite the record soon as a plain restore, so a
+               later crash can't pass an old clock off as fresh. */
+            hal_clock_restore_fresh(P.clock_year, P.clock_mon, P.clock_day,
+                                    P.clock_dow, (int)(t / 3600000u),
+                                    (int)(t / 60000u % 60u),
+                                    (int)(t / 1000u % 60u));
+            persist_mark();
+        } else {
+            hal_clock_restore(P.clock_year, P.clock_mon, P.clock_day,
+                              P.clock_dow, (int)(t / 3600000u),
+                              (int)(t / 60000u % 60u),
+                              (int)(t / 1000u % 60u));
+        }
     }
 }
 
@@ -817,10 +875,13 @@ static int chg_visible(void);        /* ui_charge.inc */
 static void chg_hide(void);
 static int goal_visible(void);       /* ui_goal.inc */
 static void goal_hide(void);
+static int pm_visible(void);         /* ui_power.inc */
 
 int ui_swipe(int cst_dir, int start_x)
 {
     last_swipe_ms = hal_millis();
+    if (pm_visible())              /* the power menu ignores swipes */
+        return 1;
     if (chg_visible()) {           /* any swipe closes the battery screen */
         chg_hide();
         return 1;
@@ -1927,6 +1988,8 @@ static void clock_cb(lv_event_t *e)
     case 14:
         alarm_on ^= 1;
         alarm_snooze_mod = -1;
+        if (alarm_on)
+            alarm_rang_day = 0;           /* a re-armed alarm rings today */
         persist_mark();
         break;
     case 15:                                   /* alarm stop */
@@ -1949,6 +2012,8 @@ static void clock_cb(lv_event_t *e)
             alarm_h = (alarm_h + st + 24) % 24;
         }
         alarm_snooze_mod = -1;
+        alarm_rang_day = 0;               /* a new time rings today */
+        alarm_fired_min = -1;
         persist_mark();
         clock_alarm_text();
         return;                                /* in place: hold works */
@@ -3087,6 +3152,7 @@ static void toast_show(const char *txt, uint32_t now)
 
 #include "ui_charge.inc"
 #include "ui_goal.inc"
+#include "ui_power.inc"
 #include "ui_hist.inc"
 
 static void toast_tick(uint32_t now)
@@ -3207,7 +3273,7 @@ void ui_tick(void)
     if (asleep && (sensors_wrist_raise() || sensors_raise_wake()))
         ui_wake();
     /* side button as nav fallback while touch is unreliable: a release
-       before the 3 s reset threshold steps through screens */
+       before the 3 s power-menu threshold steps through screens */
     static btn_sm_t bsm;
     uint32_t held = button_held_ms();
     if (held)
@@ -3226,11 +3292,20 @@ void ui_tick(void)
     } else {
         bev = btn_sm_step(&bsm, held != 0, now, asleep || water_lock);
     }
+    /* 2.4.1: a 3 s hold opens the power menu (ui_power.inc); that
+       press is dropped so letting go doesn't navigate too */
+    if (pm_tick(now, held)) {
+        bev = BTN_EV_NONE;
+        if (!held)
+            bsm = (btn_sm_t){0};
+    }
     if (bev == BTN_EV_DOUBLE) {
         hr_toggle_by_button(now);
     } else if (bev == BTN_EV_SINGLE) {
         if (asleep)
             ui_wake();
+        else if (pm_visible())
+            pm_hide();                    /* cancels the power menu */
         else if (chg_visible())
             chg_hide();                   /* closes the battery screen */
         else if (goal_visible())
@@ -3328,15 +3403,27 @@ void ui_tick(void)
     }
     hist_tick(now);
     /* alarm: once per matching minute, buzz in 500 ms pulses until STOP */
-    /* a restored clock rings too: a late alarm beats a missed one */
+    /* 2.4.1: only on a clock it can trust, once a day (alarm.h). A
+       restored clock is wound back to the last save, which made the
+       alarm ring after every restart. */
     if ((alarm_on || alarm_snooze_mod >= 0) &&
-        (hal_clock_synced() || hal_clock_restored())) {
+        alarm_clock_trusted(hal_clock_state())) {
         int mod = hal_clock_hour() * 60 + hal_clock_minute();
-        int due = (alarm_on && mod == alarm_h * 60 + alarm_m) ||
-                  mod == alarm_snooze_mod;
+        int amod = alarm_h * 60 + alarm_m;
+        uint16_t today = alarm_day_num(today_key());
+        int main_due = alarm_due(alarm_on, hal_clock_state(), mod, amod,
+                                 today, alarm_rang_day);
+        int due = main_due || mod == alarm_snooze_mod;
+        if (alarm_on && mod == amod && !main_due)
+            alarm_fired_min = mod;        /* already rang today */
         if (due && alarm_fired_min != mod && !alarm_ringing) {
-            if (mod == alarm_h * 60 + alarm_m)
+            if (main_due) {
                 alarm_snoozes = 0;        /* a new day's alarm */
+                if (today) {
+                    alarm_rang_day = today;
+                    persist_mark();
+                }
+            }
             alarm_snooze_mod = -1;
             alarm_fired_min = mod;
             alarm_ringing = 1;
@@ -3347,7 +3434,7 @@ void ui_tick(void)
             nav_sp = 0;
             nav_to(SCR_CLOCK);
         }
-        if (!due)
+        if (!due && mod != amod)
             alarm_fired_min = -1;
     }
     if (alarm_ringing || (timer_done && ring_start_ms)) {

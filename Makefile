@@ -43,6 +43,11 @@ build/test_store_daily: tests/ble/test_store_daily.c firmware/nimble_port/src/an
 	mkdir -p build
 	$(CC) -std=gnu11 -O1 -Wall -Wextra -Wno-unused-function -Ifirmware tests/ble/test_store_daily.c -o $@
 
+# 2.4.1: alarm rings only on a trusted clock, once a day
+build/test_alarm: tests/test_alarm.c firmware/alarm.h
+	@mkdir -p build
+	$(CC) -std=gnu11 -O1 -Wall -Wextra -Ifirmware tests/test_alarm.c -o $@
+
 # phone history outbox (firmware/hlog.c) on a simulated NOR flash
 build/test_hlog: tests/hlog/test_hlog.c firmware/hlog.c firmware/hlog.h
 	@mkdir -p build
@@ -65,7 +70,7 @@ hrcompare: build/test_hr build/test_hr_old
 	./build/test_hr_old | grep '^\['
 	./build/test_hr | grep '^\['
 
-test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/test_ble_units build/test_store_daily build/test_btn build/test_batt build/test_hlog
+test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/test_ble_units build/test_store_daily build/test_btn build/test_batt build/test_hlog build/test_alarm
 	./build/test_app
 	SDL_VIDEODRIVER=dummy ./build/test_screenshot
 	SDL_VIDEODRIVER=dummy ./build/test_input
@@ -76,6 +81,7 @@ test: build/test_app build/test_screenshot build/test_input build/test_ble_dfu b
 	./build/test_btn
 	./build/test_batt
 	./build/test_hlog
+	./build/test_alarm
 
 # everything: host tests plus the rendered-screen checks
 check: test uicheck
@@ -92,7 +98,7 @@ heapcheck:
 	./tests/uisnap/heapcheck.sh
 
 clean:
-	rm -rf build/voidos-sim build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/test_ble_units build/test_store_daily build/test_hr_old build/sensors_2_1.c build/uisnap
+	rm -rf build/voidos-sim build/test_app build/test_screenshot build/test_input build/test_ble_dfu build/test_hr build/test_ble_units build/test_store_daily build/test_hr_old build/sensors_2_1.c build/uisnap build/test_alarm
 	-rmdir build 2>/dev/null || true
 
 .PHONY: all test check uicheck clean hrcompare heapcheck

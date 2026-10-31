@@ -224,7 +224,9 @@ int phone_music_events(void) { return ms_event_sent; }
 
 void music_cmd(int c)
 {
-    if (ms.src == MS_SRC_AMS && ams_live()) {
+    /* 2.4.1: the face's controls work before anything has played: with
+       no source yet, iOS AMS gets the command when it is up */
+    if ((ms.src == MS_SRC_AMS || ms.src == MS_SRC_NONE) && ams_live()) {
         if (ams_cmd(c) == 0) {
             ms_event_sent++;
             return;

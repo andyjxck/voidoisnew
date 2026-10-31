@@ -20,6 +20,9 @@ int sensors_hrs_ok(void);
 int hal_clock_synced(void);
 int hal_clock_restored(void);
 int ui_face_digital(void);
+int hal_battery_pct(void);
+int hal_charging(void);
+int ble_connected(void);
 int phone_take_face_dirty(void);
 void hal_clock_date(int *y, int *mo, int *d, int *dow);
 
@@ -275,8 +278,10 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font,
    y   8..49   date block, centred (2.2.5: the water chip went; WATER
                lives in STATS)
    y  40..120  big time: hours at 72 px, ":MM" at 56 px, one baseline
-   y 124..164  now-playing chip while music plays (tap -> music),
+   y 124..164  2.4.1: music controls whenever the phone is linked:
+               previous | track (tap -> music screen) | play/pause | next,
                else a hex rule
+   2.4.1: battery % top right, on both faces, linked or not
    y 170..232  steps pill (cyan) + heart-rate pill (red), each 112x62 so
                a 5-digit step count / 3-digit BPM sits on its own row
                under the label instead of on top of it */
@@ -291,6 +296,13 @@ static lv_obj_t *label(lv_obj_t *parent, const lv_font_t *font,
 #define MUS_H 42
 
 static lv_obj_t *d_mus_hit, *d_mus_lbl, *d_mus_sub;
+/* 2.4.1: music strip hit areas, x ranges inside the strip (18..222) */
+#define MUS_PREV_X 18
+#define MUS_TXT_X 60
+#define MUS_TXT_W 80
+#define MUS_PLAY_X 142
+#define MUS_NEXT_X 182
+#define MUS_BTN_W 40
 static lv_obj_t *d_lbl_dow, *d_lbl_min;
 static lv_obj_t *art_obj;
 static int d_mus_on = -1, d_mus_playing = -1;
@@ -304,10 +316,18 @@ static void digi_draw(lv_event_t *ev)
     lv_layer_t *l = lv_event_get_layer(ev);
     /* middle: music chip or hex rule */
     if (d_mus_on > 0) {
+        /* 2.4.1: controls, shown whenever the phone is linked */
+        int cy = MUS_Y + MUS_H / 2;
         dk_oct(l, 18, MUS_Y, 204, MUS_H, 10, DK_RED, 2, 30);
-        dk_hex(l, 42, MUS_Y + MUS_H / 2, 13, DK_RED, 2);
-        dk_music(l, d_mus_playing > 0 ? DK_M_PLAY : DK_M_PAUSE, 43,
-                 MUS_Y + MUS_H / 2, 5, lv_color_white());
+        dk_hex(l, MUS_PREV_X + MUS_BTN_W / 2 + 1, cy, 13, DK_RED, 2);
+        dk_music(l, DK_M_PREV, MUS_PREV_X + MUS_BTN_W / 2 + 1, cy, 5,
+                 lv_color_white());
+        dk_hex(l, MUS_PLAY_X + MUS_BTN_W / 2, cy, 13, DK_RED, 2);
+        dk_music(l, d_mus_playing > 0 ? DK_M_PAUSE : DK_M_PLAY,
+                 MUS_PLAY_X + MUS_BTN_W / 2 + 1, cy, 5, lv_color_white());
+        dk_hex(l, MUS_NEXT_X + MUS_BTN_W / 2 - 1, cy, 13, DK_RED, 2);
+        dk_music(l, DK_M_NEXT, MUS_NEXT_X + MUS_BTN_W / 2 - 1, cy, 5,
+                 lv_color_white());
     } else {
         dk_rule(l, MUS_Y + MUS_H / 2, DK_CYAN);
     }
@@ -323,6 +343,73 @@ static void digi_draw(lv_event_t *ev)
 static void chip_cb(lv_event_t *e)
 {
     ui_nav_open((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+/* 2.4.1: the face's music buttons send straight to the phone */
+static void mus_btn_cb(lv_event_t *e)
+{
+    int c = (int)(intptr_t)lv_event_get_user_data(e);
+    music_cmd(c);
+    lv_obj_invalidate(art_obj);
+}
+
+static lv_obj_t *mus_btn(lv_obj_t *parent, int x, int cmd)
+{
+    lv_obj_t *o = lv_obj_create(parent);
+    lv_obj_set_pos(o, x, 0);
+    lv_obj_set_size(o, MUS_BTN_W, MUS_H);
+    lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(o, 0, 0);
+    lv_obj_set_style_pad_all(o, 0, 0);
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(o, mus_btn_cb, LV_EVENT_CLICKED,
+                        (void *)(intptr_t)cmd);
+    return o;
+}
+
+/* ---- battery % top right (2.4.1), both faces ------------------------- */
+#define BATT_RX 232                 /* right edge of the % text */
+#define BATT_Y 5
+static lv_obj_t *batt_icon, *batt_lbl;
+static int batt_last = -2, batt_last_chg = -1;
+
+static void batt_build(lv_obj_t *scr)
+{
+    batt_icon = mi_obj(scr, MI_BATT_FULL, 20, lv_color_hex(0xD8E0EC),
+                       BATT_RX - 50, BATT_Y - 3);
+    batt_lbl = lv_label_create(scr);
+    lv_obj_set_style_text_font(batt_lbl, &kenney12, 0);
+    lv_obj_set_style_text_color(batt_lbl, lv_color_hex(0xD8E0EC), 0);
+    lv_label_set_text(batt_lbl, "");
+    lv_obj_set_pos(batt_lbl, BATT_RX - 30, BATT_Y);
+    batt_last = -2;
+    batt_last_chg = -1;
+}
+
+static void batt_tick(void)
+{
+    int pct = hal_battery_pct();
+    int chg = hal_on_charger() ? 1 : 0;
+    if (pct == batt_last && chg == batt_last_chg)
+        return;
+    batt_last = pct;
+    batt_last_chg = chg;
+    char b[8];
+    if (pct < 0)
+        lv_snprintf(b, sizeof b, "--%%");
+    else
+        lv_snprintf(b, sizeof b, "%d%%", pct > 100 ? 100 : pct);
+    lv_label_set_text(batt_lbl, b);
+    lv_obj_update_layout(batt_lbl);
+    int w = lv_obj_get_width(batt_lbl);
+    lv_obj_set_x(batt_lbl, BATT_RX - w);
+    uint32_t c = chg ? 0x46D8E0 : (pct >= 0 && pct <= 20) ? 0xF0586E
+                                                          : 0xD8E0EC;
+    lv_obj_set_style_text_color(batt_lbl, lv_color_hex(c), 0);
+    lv_image_set_src(batt_icon, mi_img(mi_battery(pct, chg), 20));
+    lv_obj_set_style_image_recolor(batt_icon, lv_color_hex(c), 0);
+    /* the 20 px icon has ~6 px of air each side of the battery body */
+    lv_obj_set_x(batt_icon, BATT_RX - w - 17);
 }
 
 static lv_obj_t *hit(lv_obj_t *scr, int x, int y, int w, int h, int which)
@@ -366,7 +453,9 @@ static void time_layout(void)
 static int face_phone_refresh(void)
 {
     int dirty = 0;
-    int on = music_active();
+    /* 2.4.1: the controls show whenever the phone is linked, not only
+       while something plays */
+    int on = ble_connected() ? 1 : 0;
     const struct music *m = music_get();
     if (on != d_mus_on || (on && m->playing != d_mus_playing) ||
         (on && phone_take_face_dirty())) {
@@ -374,9 +463,13 @@ static int face_phone_refresh(void)
             /* line 1: the track, one line with "..."; line 2: the
                artist while it plays, else PAUSED (never both on one) */
             char t[44];
-            ui_music_ascii(t, m->track[0] ? m->track : "MUSIC", sizeof t);
+            int known = music_active() && m->track[0];
+            ui_music_ascii(t, known ? m->track : "MUSIC", sizeof t);
             lv_label_set_text(d_mus_lbl, t);
-            if (!m->playing) {
+            if (!known) {
+                lv_label_set_text(d_mus_sub, "NO TRACK");
+                lv_obj_set_style_text_color(d_mus_sub, lv_color_hex(0x8A94A8), 0);
+            } else if (!m->playing) {
                 lv_label_set_text(d_mus_sub, "PAUSED");
                 lv_obj_set_style_text_color(d_mus_sub, lv_color_hex(0xF0586E), 0);
             } else if (m->artist[0]) {
@@ -384,7 +477,7 @@ static int face_phone_refresh(void)
                 lv_label_set_text(d_mus_sub, t);
                 lv_obj_set_style_text_color(d_mus_sub, lv_color_hex(0x8A94A8), 0);
             } else {
-                lv_label_set_text(d_mus_sub, "NOW PLAYING");
+                lv_label_set_text(d_mus_sub, "PLAYING");
                 lv_obj_set_style_text_color(d_mus_sub, lv_color_hex(0xF0586E), 0);
             }
             lv_obj_remove_flag(d_mus_hit, LV_OBJ_FLAG_HIDDEN);
@@ -433,13 +526,26 @@ static void build_digital(lv_obj_t *scr)
 
     /* now-playing chip, while music plays or was just paused: two
        one-line rows (2.2.1 let the title wrap over "NOW PLAYING") */
-    d_mus_hit = hit(scr, 18, MUS_Y, 204, MUS_H, 2);
-    d_mus_lbl = label_l(d_mus_hit, &kenney12, 0xFFFFFF, 46, 6, 148,
+    /* 2.4.1: a strip of controls: previous, the track (tap: the full
+       music screen), play/pause, next */
+    d_mus_hit = lv_obj_create(scr);
+    lv_obj_set_pos(d_mus_hit, 18, MUS_Y);
+    lv_obj_set_size(d_mus_hit, 204, MUS_H);
+    lv_obj_set_style_bg_opa(d_mus_hit, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(d_mus_hit, 0, 0);
+    lv_obj_set_style_pad_all(d_mus_hit, 0, 0);
+    lv_obj_remove_flag(d_mus_hit,
+                       LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    mus_btn(d_mus_hit, MUS_PREV_X - 18, MC_PREV);
+    mus_btn(d_mus_hit, MUS_PLAY_X - 18, MC_TOGGLE);
+    mus_btn(d_mus_hit, MUS_NEXT_X - 18, MC_NEXT);
+    lv_obj_t *txt = hit(d_mus_hit, MUS_TXT_X - 18, 0, MUS_TXT_W, MUS_H, 2);
+    d_mus_lbl = label_l(txt, &kenney12, 0xFFFFFF, 2, 6, MUS_TXT_W - 4,
                         LV_TEXT_ALIGN_LEFT, "");
     lv_obj_set_height(d_mus_lbl, 14);
     lv_label_set_long_mode(d_mus_lbl, LV_LABEL_LONG_DOT);
     lv_obj_remove_flag(d_mus_lbl, LV_OBJ_FLAG_CLICKABLE);
-    d_mus_sub = label_l(d_mus_hit, &kenney12, 0xF0586E, 46, 22, 148,
+    d_mus_sub = label_l(txt, &kenney12, 0xF0586E, 2, 22, MUS_TXT_W - 4,
                         LV_TEXT_ALIGN_LEFT, "");
     lv_obj_set_height(d_mus_sub, 14);
     lv_label_set_long_mode(d_mus_sub, LV_LABEL_LONG_DOT);
@@ -470,9 +576,11 @@ static void build_digital(lv_obj_t *scr)
                       PILL_W - 6, "--");
     breath_start(d_lbl_bpm);
 
+    batt_build(scr);
     last_bpm = last_steps = last_synced = last_dom = last_min = -1;
     d_mus_on = d_mus_playing = -1;
     face_phone_refresh();
+    batt_tick();
 }
 
 void ui_face_build(lv_obj_t *scr)
@@ -531,6 +639,8 @@ void ui_face_build(lv_obj_t *scr)
     lbl_bpm = label(scr, &kenney9, 0xD8E0EC, 114, 173, 46, "--");
     lv_obj_set_style_text_align(lbl_bpm, LV_TEXT_ALIGN_LEFT, 0);
     breath_start(lbl_bpm);
+    batt_build(scr);
+    batt_tick();
 }
 
 
@@ -556,6 +666,11 @@ void ui_face_tick(void)
 {
     frame_ms = hal_millis();
     char buf[24];
+    static uint32_t last_batt;
+    if (frame_ms - last_batt >= 1000) {
+        last_batt = frame_ms;
+        batt_tick();
+    }
 
     if (is_digital) {
         bpm_label(d_lbl_bpm, 0xF0586E);
@@ -700,4 +815,15 @@ void ui_face_tick(void)
         if (heart_needs_redraw())
             lv_obj_invalidate(heart_obj);
     }
+}
+
+/* 2.4.1: for the screen tests (tests/uisnap) */
+int ui_face_music_shown(void)
+{
+    return d_mus_hit && !lv_obj_has_flag(d_mus_hit, LV_OBJ_FLAG_HIDDEN);
+}
+
+const char *ui_face_batt_text(void)
+{
+    return batt_lbl ? lv_label_get_text(batt_lbl) : "";
 }

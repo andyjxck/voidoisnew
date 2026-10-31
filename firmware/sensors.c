@@ -742,6 +742,13 @@ void sensors_set_mode(int screen_on, int hr_busy)
 }
 int sensors_hr_powered(void) { return hrs_powered; }
 
+/* 2.4.1: power menu, before System OFF: the HR LED off */
+void sensors_power_off(void)
+{
+    if (hrs_ok)
+        hrs_power(0);
+}
+
 static int hr_want(uint32_t raw)
 {
     if (!hr_on)

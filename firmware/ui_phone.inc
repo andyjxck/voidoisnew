@@ -240,7 +240,7 @@ void ui_nav_open(int which)
         return;
     if (which == 1)
         nav_to(SCR_WATER);
-    else if (which == 2 && music_active())
+    else if (which == 2 && ble_connected())   /* 2.4.1: linked is enough */
         nav_to(SCR_MUSIC);
 }
 

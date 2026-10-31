@@ -75,6 +75,14 @@ static void flash_wait(void)
     }
 }
 
+/* 2.4.1: deep power-down before System OFF (power menu). The next
+   boot's spi_flash_init() releases it (0xAB). */
+void spi_flash_deep_sleep(void)
+{
+    flash_wait();
+    flash_cmd_only(0xB9);
+}
+
 void spi_flash_init(void)
 {
     /* display_init left MISO unconnected; attach it for flash reads */

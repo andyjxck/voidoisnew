@@ -63,8 +63,16 @@ int main(void)
             hal_boot_confirm();
             img_confirmed = 1;
         }
-        if (button_held_ms() >= 3000)
-            SCB_AIRCR = 0x05FA0004;      /* reset -> revert to InfiniTime */
+        /* 2.4.1: a 3 s hold now opens the power menu (ui_power.inc).
+           Held on to 8 s it still resets, with the button down, so the
+           bootloader's button-held recovery works as before; the
+           settings and the clock are saved first (clock marked fresh,
+           so the alarm doesn't need the phone after it). */
+        if (button_held_ms() >= 8000) {
+            extern void ui_save_before_restart(void);
+            ui_save_before_restart();
+            SCB_AIRCR = 0x05FA0004;
+        }
         hal_delay_ms(5);
     }
 }
