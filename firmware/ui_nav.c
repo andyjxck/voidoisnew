@@ -464,6 +464,23 @@ static void persist_load(void)
     DL = P.dl;
     if (DL.water_ml > 10000)
         DL.water_ml = 0;
+    /* 2.4.1: everything else in the record is checked too, so a record
+       from any older build (or a damaged one that passed its CRC) loads
+       as defaults instead of out-of-range state */
+    DL.goals_hit &= (uint8_t)(GOAL_STEPS | GOAL_WATER);
+    if (DL.rest_bpm && (DL.rest_bpm < 25 || DL.rest_bpm > 200))
+        DL.rest_bpm = 0;
+    if (P.brightness == 0 || P.brightness > 100)
+        P.brightness = 75;     /* never boot to a dark screen */
+    P.dnd = P.dnd ? 1 : 0;
+    P.airplane = P.airplane ? 1 : 0;
+    P.bt_on = P.bt_on ? 1 : 0;
+    P.alarm_on = P.alarm_on ? 1 : 0;
+    P.face_dig = P.face_dig ? 1 : 0;
+    P.s_track = P.s_track ? 1 : 0;
+    if (P.clock_tod_ms >= 86400000u || P.clock_mon < 1 || P.clock_mon > 12 ||
+        P.clock_day < 1 || P.clock_day > 31 || P.clock_year > 2099)
+        P.clock_ok = 0;
     sleep_day = P.sleep_day;
     goal_steps_v = P.goal_steps;
     goal_water_qv = P.goal_water_q;

@@ -17,6 +17,7 @@
 
 #define BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN 0x0d
 #define BLE_ATT_ERR_INSUFFICIENT_RES       0x11
+#define BLE_ATT_ERR_UNLIKELY               0x0e
 
 struct ble_gatt_access_ctxt;
 

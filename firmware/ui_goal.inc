@@ -28,6 +28,7 @@
 #define GOAL_CY        92
 #define GOAL_R         58
 #define GOAL_NCONF     20
+#define GOAL_BOOT_QUIET_MS 15000u   /* 2.4.1: no celebration this soon after boot */
 
 int hist_ble_take_goals(uint32_t *v);      /* ble_hist.c */
 
@@ -285,6 +286,19 @@ static void goal_tick(uint32_t now)
         int st = ui_steps_today();
         unsigned due = goal_due(&DL, today, st < 0 ? 0 : (uint32_t)st,
                                 goal_steps_n(), goal_water_n());
+        /* 2.4.1: boot safety. 2.4.0 celebrated, buzzed and woke the
+           screen within a second of every boot when today's goals were
+           already met (an older record has goals_hit = 0), before the
+           image was confirmed at 3 s. A reset there (a flat battery
+           under the motor) left it unconfirmed, so the bootloader went
+           back, and the next boot did the same. Now a goal already met
+           in the first GOAL_BOOT_QUIET_MS after boot is only marked hit:
+           no buzz, no animation, nothing new before the confirm. */
+        if (due && hal_millis() < GOAL_BOOT_QUIET_MS) {
+            DL.goals_hit |= (uint8_t)due;
+            persist_mark();
+            due = 0;
+        }
         if (due && !held) {
             DL.goals_hit |= (uint8_t)due;
             persist_mark();                /* once a day, across reboots */

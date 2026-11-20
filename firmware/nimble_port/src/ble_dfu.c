@@ -143,7 +143,9 @@ static int dfu_packet(uint16_t conn, struct os_mbuf *om)
             break;
         app_size = (uint32_t)sz[8] | ((uint32_t)sz[9] << 8) |
                    ((uint32_t)sz[10] << 16) | ((uint32_t)sz[11] << 24);
-        if (app_size == 0 || app_size > DFU_MAX_SIZE) {
+        /* 2.4.1: the image must leave the trailer sectors free, or
+           writing the magic erases the end of the image */
+        if (app_size == 0 || app_size > DFU_MAX_SIZE - DFU_TRAILER_ERASE) {
             const uint8_t d[3] = {OP_RESP, OP_START, 4};
             dfu_notify(conn, d, 3);
             dfu_state = ST_IDLE;
@@ -205,8 +207,6 @@ static int dfu_packet(uint16_t conn, struct os_mbuf *om)
            stalled waiting for it */
         if (total_len + buf_len == app_size) {
             dfu_flush();
-            if (app_size < DFU_MAX_SIZE)
-                dfu_write_magic();
             const uint8_t d[3] = {OP_RESP, OP_RECV_IMG, 1};
             dfu_notify(conn, d, 3);
             dfu_state = ST_VALIDATE;
@@ -291,10 +291,15 @@ static int dfu_control(uint16_t conn, struct os_mbuf *om)
         const uint8_t d[3] = {OP_RESP, OP_VALIDATE,
                               crc == expect_crc ? 1 : 5};
         dfu_notify(conn, d, 3);
-        if (crc == expect_crc)
+        /* 2.4.1: the swap request (trailer magic) is written only once
+           the image is known good, so a failed transfer never leaves a
+           request for a broken image behind */
+        if (crc == expect_crc) {
+            dfu_write_magic();
             dfu_state = ST_VALIDATED;
-        else
+        } else {
             dfu_state = ST_IDLE;
+        }
         break;
     }
     case OP_ACTIVATE:

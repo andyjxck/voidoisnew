@@ -110,3 +110,16 @@ build/test_batt: tests/test_batt.c firmware/batt.h
 build/test_btn: tests/test_btn.c firmware/btn_sm.h
 	mkdir -p build
 	$(CC) -std=gnu11 -O1 -Wall -Wextra -Werror $< -o $@
+
+# 2.4.1: boot the release image in the emulator on saved settings from
+# older builds (a goals-met 2.3.x record, a random one with a good CRC,
+# a blank flash). Each must confirm itself (MCUBoot image_ok) with no
+# fault or reset, or the bootloader would swap back. Slow: a few minutes.
+bootcheck:
+	python3 tools/emu/mknor.py build/nor_goal.bin
+	python3 tools/emu/mknor.py build/nor_fuzz.bin --fuzz 9
+	for n in goal fuzz; do $(HOME)/.voidos-tools/bin/python3 tools/emu/boot_nor.py firmware/voidos-app.out firmware/voidos-app.bin 6000 build/nor_$$n.bin - --quiet || exit 1; done
+	$(HOME)/.voidos-tools/bin/python3 tools/emu/boot_nor.py firmware/voidos-app.out firmware/voidos-app.bin 6000 - - --quiet
+	cd build && rm -rf pkg && mkdir pkg && cd pkg && unzip -q ../../firmware/voidos-dfu-*.zip
+	DFU_PKG_DIR=build/pkg ./build/test_ble_dfu
+.PHONY: bootcheck

@@ -207,6 +207,7 @@ touch_diag_t touch_diag;
 /* ---- include the unit under test -------------------------------------- */
 
 #include "../../firmware/nimble_port/src/ble_dfu.c"
+#include "mcuboot_model.h"
 
 /* ---- driver helpers ---------------------------------------------------- */
 
@@ -236,6 +237,16 @@ static void write_chr(uint16_t attr, const void *d, uint16_t n)
                                         mbuf_from(d, n)};
     dfu_access(0, attr, &ctxt, NULL);
     os_mbuf_free_chain(ctxt.om);
+}
+
+static int write_chr_on(uint16_t conn, uint16_t attr, const void *d,
+                        uint16_t n)
+{
+    struct ble_gatt_access_ctxt ctxt = {BLE_GATT_ACCESS_OP_WRITE_CHR,
+                                        mbuf_from(d, n)};
+    int rc = dfu_access(conn, attr, &ctxt, NULL);
+    os_mbuf_free_chain(ctxt.om);
+    return rc;
 }
 
 static void write_pkt_chained(uint16_t attr, const void *d, uint16_t n,
@@ -372,6 +383,9 @@ int main(void)
     st = run_dfu(dat, dat_len, img, img_len, 1);
     expect_notify(0x10, 0x04, 0x05, "validate reports CRC error");
     CHECK(st == ST_IDLE, "returns to IDLE after bad CRC");
+    /* 2.4.1: and no swap request is left for the broken image */
+    CHECK(memcmp(g_flash + DFU_MAGIC_ADDR, magic, 16) != 0,
+          "no trailer magic after a failed CRC");
 
     /* 3. oversize image rejected at START */
     reset_dfu();
@@ -482,6 +496,95 @@ int main(void)
         CHECK(blank, "trailer erased before magic");
         static const uint8_t mg[4] = {0x77, 0xc2, 0x95, 0xf3};
         CHECK(memcmp(&g_flash[DFU_MAGIC_ADDR], mg, 4) == 0, "magic written");
+    }
+
+    /* 12. 2.4.1: the whole handoff. Run the update the way nRF Connect
+       does, then hand the slot to the bootloader model: it must find the
+       swap request, a good header, a matching SHA-256 and a sane vector
+       table, and pick a test swap (the new image then confirms itself
+       after 3 s of running, or MCUBoot swaps back). DFU_PKG_DIR points at
+       the package being released; without it the fixture is used. */
+    {
+        const char *pk = getenv("DFU_PKG_DIR");
+        long d2l = dat_len, i2l = img_len;
+        uint8_t *d2 = dat, *i2 = img;
+        if (pk) {
+            snprintf(path, sizeof path, "%s/voidos-app-image.dat", pk);
+            d2 = read_file(path, &d2l);
+            snprintf(path, sizeof path, "%s/voidos-app-image.bin", pk);
+            i2 = read_file(path, &i2l);
+        }
+        if (d2 && i2) {
+            /* the slot holds an older, longer image: stale bytes behind
+               the new one must not matter */
+            reset_dfu();
+            int s12 = run_dfu(d2, d2l, i2, i2l, 0);
+            g_notif_len = 0;
+            CHECK(s12 == ST_VALIDATED, "handoff: update validates");
+            const char *why;
+            int sw = mcuboot_decide(g_flash + DFU_WRITE_OFFSET, &why);
+            if (sw != MB_TEST)
+                printf("  bootloader model: %s\n", why);
+            CHECK(sw == MB_TEST, "handoff: bootloader sees a good image "
+                                 "and does a test swap");
+            /* ACTIVATE resets into the bootloader only when validated */
+            CHECK(dfu_state == ST_VALIDATED, "handoff: ACTIVATE would reset");
+            /* a corrupted transfer: no swap at all, old image boots */
+            reset_dfu();
+            run_dfu(d2, d2l, i2, i2l, 1);
+            g_notif_len = 0;
+            sw = mcuboot_decide(g_flash + DFU_WRITE_OFFSET, &why);
+            CHECK(sw == MB_NONE, "handoff: bad transfer leaves no swap request");
+            /* flipping one image byte after a good update: the bootloader
+               refuses it rather than booting it */
+            reset_dfu();
+            run_dfu(d2, d2l, i2, i2l, 0);
+            g_notif_len = 0;
+            g_flash[DFU_WRITE_OFFSET + 1000] ^= 1;
+            sw = mcuboot_decide(g_flash + DFU_WRITE_OFFSET, &why);
+            CHECK(sw == MB_FAIL, "handoff: model catches a damaged image");
+        }
+        if (pk) {
+            free(d2);
+            free(i2);
+        }
+    }
+
+    /* 13. 2.4.1: two links. While VoidHealth (link 3) stays connected,
+       nRF Connect (link 0) runs the update; link 3 can't disturb it */
+    {
+        reset_dfu();
+        ble_dfu_init();
+        write_chr_on(0, h_ctrl, "\x01\x04", 2);
+        CHECK(ble_dfu_busy() && ble_dfu_conn() == 0, "update owned by link 0");
+        g_notif_len = 0;
+        int rc = write_chr_on(3, h_ctrl, "\x01\x04", 2);
+        CHECK(rc != 0 && dfu_state == ST_START,
+              "other link can't restart a running update");
+        uint8_t junk[12] = {0xFF, 0xFF, 0xFF, 0xFF};
+        write_chr_on(3, h_pkt, junk, 12);
+        CHECK(dfu_state == ST_START && g_notif_len == 0,
+              "other link's packets are ignored");
+        ble_dfu_on_disconnect(3);
+        CHECK(ble_dfu_busy(), "other link leaving keeps the update");
+        ble_dfu_on_disconnect(0);
+        CHECK(!ble_dfu_busy() && ble_dfu_conn() == 0xFFFF,
+              "update link leaving ends it");
+        rc = write_chr_on(3, h_ctrl, "\x01\x04", 2);
+        CHECK(rc == 0 && ble_dfu_busy() && ble_dfu_conn() == 3,
+              "then the other link can start one");
+    }
+
+    /* 14. an image too big to leave the trailer free is refused */
+    {
+        reset_dfu();
+        ble_dfu_init();
+        write_chr(h_ctrl, (const uint8_t *)"\x01\x04", 2);
+        uint32_t n = DFU_MAX_SIZE - 0x1000u;
+        uint8_t sz[12] = {0};
+        sz[8] = n; sz[9] = n >> 8; sz[10] = n >> 16;
+        write_chr(h_pkt, sz, 12);
+        expect_notify(0x10, 0x01, 0x04, "image overlapping the trailer refused");
     }
 
     free(dat);
