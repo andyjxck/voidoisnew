@@ -1632,8 +1632,16 @@ static void fmt_ms(uint32_t ms, char *out)
         lv_snprintf(out, 12, "%02u:%02u", s / 60, s % 60);
 }
 
+static void toast_show(const char *txt, uint32_t now);
 static void start_workout(void)
 {
+    /* 2.2.3: a workout needs heart rate; if the side-button double press
+       turned it off, turn it back on and say so */
+    if (!sensors_hr_on()) {
+        sensors_hr_set(1);
+        persist_mark();
+        toast_show("HR ON", hal_millis());
+    }
     w_active = 1;
     w_paused = 0;
     w_sets = 0;
@@ -2373,7 +2381,7 @@ static int st_dx, st_drag;
 static void st_value(int i, char *v, char *u)
 {
     int steps = ui_steps_today();
-    int bpm = sensors_bpm();
+    int bpm = sensors_hr_on() ? sensors_bpm() : 0;
     switch (i) {
     case 0:
         lv_snprintf(v, 16, "%d", steps > 0 ? steps : 0);
@@ -3058,7 +3066,7 @@ static void cardio_zone(int bpm, char *z, const char **name)
 static void cardio_draw(lv_event_t *e)
 {
     lv_layer_t *layer = lv_event_get_layer(e);
-    int bpm = sensors_bpm();
+    int bpm = sensors_hr_on() ? sensors_bpm() : 0;
     int locked = bpm > 0;
     int stale = locked && sensors_bpm_stale();
     lv_color_t hc = stale ? lv_color_hex(BPM_STALE_RGB)
@@ -3117,8 +3125,9 @@ static void build_cardio(lv_obj_t *r)
                        LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(cardio_art, cardio_draw, LV_EVENT_DRAW_MAIN, NULL);
 
-    /* the live BPM: full-width and centred, so 72 -> 104 stays centred */
-    int bpm = sensors_bpm();
+    /* the live BPM: full-width and centred, so 72 -> 104 stays centred.
+       2.2.3: HR switched off shows no number at all, not a stale one */
+    int bpm = sensors_hr_on() ? sensors_bpm() : 0;
     int stale = bpm > 0 && sensors_bpm_stale();
     char buf[16];
     if (bpm > 0)
@@ -3443,7 +3452,7 @@ void ui_tick(void)
         rebuild();
     /* resting HR = lowest reading this session outside workouts */
     {
-        int b = sensors_bpm();
+        int b = sensors_hr_on() ? sensors_bpm() : 0;  /* HR off = gap */
         if (b > 0 && !sensors_bpm_stale() && !w_active &&
             (DL.rest_bpm == 0 || b < DL.rest_bpm))
             DL.rest_bpm = b;
@@ -3559,7 +3568,7 @@ void ui_tick(void)
         }
         {
             static int last_key = -4;
-            int bpm = sensors_bpm();
+            int bpm = sensors_hr_on() ? sensors_bpm() : 0;
             int stale = bpm > 0 && sensors_bpm_stale();
             int key = bpm * 2 + stale;       /* held flips the colour */
             if (key != last_key) {
