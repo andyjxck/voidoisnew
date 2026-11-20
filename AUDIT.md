@@ -107,7 +107,7 @@ on the sleep screen did nothing when sleep tracking was switched off.
   unanswered and gives up after three.
 - Settings: power-loss-safe save (two CRC-checked slots); a 2.2.2 record still
   loads.
-- HR double press: 350 ms window, two buzzes on / one off, HR ON / HR OFF
+- HR double press: 300 ms window, two buzzes on / one off, HR ON / HR OFF
   toast, sensor powered down, no stale numbers on face/cardio/stats, resting HR
   skips the gap, a running workout keeps HR on ("HR IN USE") and starting one
   turns HR back on; saved across reboots. tests/test_btn.c.
