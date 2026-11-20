@@ -143,8 +143,12 @@ int hist_ble_init(void)
     return rc;
 }
 
-void hist_ble_disconnect(void)
+/* 2.4.1: two links can be up (VoidHealth + nRF Connect); only the link
+   the stream belongs to ends it */
+void hist_ble_disconnect(uint16_t conn)
 {
+    if (conn != stream_conn)
+        return;
     streaming = 0;
     req_send = 0;
 }
@@ -167,7 +171,7 @@ void hist_ble_tick(void)
     }
     if (!streaming)
         return;
-    if (!ble_connected() || ble_conn_handle() != stream_conn) {
+    if (ble_gap_conn_find(stream_conn, NULL) != 0) {
         streaming = 0;
         return;
     }

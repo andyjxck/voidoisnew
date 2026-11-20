@@ -373,6 +373,8 @@ static int diag_read2(struct os_mbuf *om)
 }
 
 int ble_dfu_busy(void) { return dfu_state != 0; }
+/* the link running the update, 0xFFFF when none */
+uint16_t ble_dfu_conn(void) { return dfu_state != 0 ? dfu_conn : 0xFFFF; }
 
 /* Main loop: drop a session nobody is driving any more. */
 void ble_dfu_poll(uint32_t now_ms)
@@ -399,6 +401,12 @@ static int dfu_access(uint16_t conn, uint16_t attr,
     (void)arg;
     if (attr != h_diag && attr != h_diag2)   /* don't count our own probes */
         d_access_calls++;
+    /* 2.4.1: two links can be up. While one runs an update, the other
+       can't write into it or restart it; an abandoned session still
+       ends after DFU_IDLE_ABORT_MS and then anyone can start. */
+    if ((attr == h_ctrl || attr == h_pkt) && dfu_state != 0 &&
+        dfu_conn != 0xFFFF && conn != dfu_conn)
+        return attr == h_ctrl ? BLE_ATT_ERR_UNLIKELY : 0;
     if (attr == h_ctrl || attr == h_pkt)
         dfu_touched = 1;
     if (attr == h_ctrl)

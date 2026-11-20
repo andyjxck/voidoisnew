@@ -912,6 +912,11 @@ int main(int argc, char **argv)
                     alarm_h, alarm_m);
         }
         alarm_h = keep_h; alarm_m = keep_m;
+        /* 2.4.1: the old-record loads above leave the analog face and
+           water lock on (missing fields); every shot after this one
+           expects the digital face, unlocked */
+        face_dig = 1;
+        wlock_set(0);
     }
     /* 2.2.4 battery / charging screen */
     {
@@ -995,6 +1000,8 @@ int main(int argc, char **argv)
         chg_tick(t0 + 300);
         finding(chg_visible() && !asleep ? 0 : 1,
                 "boot on the charger: wakes and shows the charging screen");
+        lv_obj_invalidate(chg_box);
+        settle(); save(dir, "57_charge_on_boot");
         chg_hide();
         snap_on_charger = 0;
         chg_tick(t0 + 400);

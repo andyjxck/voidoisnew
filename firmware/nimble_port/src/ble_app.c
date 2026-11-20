@@ -68,10 +68,23 @@ void ams_tick(void);
 int phone_svcs_init(void);
 int hist_ble_init(void);                /* ble_hist.c: phone history */
 void hist_ble_tick(void);
-void hist_ble_disconnect(void);
+void hist_ble_disconnect(uint16_t conn);
 void phone_music_reset(void);
 static int ble_compat;          /* advertise as "InfiniTime" for InfiniLink */
 uint16_t ble_conn_handle(void) { return conn_handle; }
+/* 2.4.1: a second link. conn_handle stays the phone link (ANCS, AMS,
+   security, history); conn_aux is anyone else, e.g. nRF Connect on
+   another device doing an update while VoidHealth stays connected. When
+   the phone link drops, conn_aux takes its place. */
+static uint16_t conn_aux = BLE_HS_CONN_HANDLE_NONE;
+static int cp_aux_state;        /* 0 none, 2 fast asked (update on aux) */
+#define BLE_LINKS_MAX MYNEWT_VAL(BLE_MAX_CONNECTIONS)
+static int link_count(void)
+{
+    return (conn_handle != BLE_HS_CONN_HANDLE_NONE) +
+           (conn_aux != BLE_HS_CONN_HANDLE_NONE);
+}
+int ble_link_count(void) { return link_count(); }
 void ble_bond_store_init(uint16_t sig);
 void ble_bond_store_poll(uint32_t now, int busy);
 void ble_bond_store_gatt_sync(void);
@@ -164,12 +177,22 @@ int ble_diag_conn_itvl(void) { return d_cp_itvl; }
 int ble_diag_conn_lat(void) { return d_cp_lat; }
 static void conn_params_poll(uint32_t now)
 {
-    if (conn_handle == BLE_HS_CONN_HANDLE_NONE)
-        return;
-    extern int ble_dfu_busy(void);
-    int fast = ble_dfu_busy();
+    extern uint16_t ble_dfu_conn(void);
     struct ble_gap_upd_params up;
     memset(&up, 0, sizeof up);
+    uint16_t dconn = ble_dfu_conn();
+    if (conn_aux != BLE_HS_CONN_HANDLE_NONE && dconn == conn_aux &&
+        cp_aux_state != 2) {
+        up.itvl_min = 12;               /* update on the second link */
+        up.itvl_max = 24;
+        up.latency = 0;
+        up.supervision_timeout = 400;
+        ble_gap_update_params(conn_aux, &up);
+        cp_aux_state = 2;
+    }
+    if (conn_handle == BLE_HS_CONN_HANDLE_NONE)
+        return;
+    int fast = dconn == conn_handle;
     if (fast && cp_state != 2) {
         up.itvl_min = 12;               /* 15 ms */
         up.itvl_max = 24;               /* 30 ms */
@@ -196,7 +219,18 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
     d_gap_events++;
     switch (ev->type) {
     case BLE_GAP_EVENT_CONNECT:
-        if (ev->connect.status == 0) {
+        if (ev->connect.status == 0 &&
+            conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+            /* 2.4.1: a second central while the phone link is up (nRF
+               Connect, a second phone). It gets the GATT server, the DFU
+               service included; the phone-only clients (ANCS, AMS) and
+               the security request stay on the phone link. */
+            conn_aux = ev->connect.conn_handle;
+            cp_aux_state = 0;
+            peer_resolve(conn_aux);
+            d_conns++;
+            ble_advertise();   /* off once every link is in use */
+        } else if (ev->connect.status == 0) {
             conn_handle = ev->connect.conn_handle;
             /* before anything asks for a key: name the bonded phone */
             peer_resolve(conn_handle);
@@ -219,8 +253,9 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
                     d_cp_lat = cd.conn_latency;
                 }
             }
-            if (ble_compat)
-                ble_advertise();   /* keep InfiniLink able to see us */
+            /* 2.4.1: keep a connectable advert up while a link is free,
+               so nRF Connect can still find the watch (InfiniLink too) */
+            ble_advertise();
         } else {
             adv_fast_window();
             ble_advertise();
@@ -237,28 +272,61 @@ static int gap_cb(struct ble_gap_event *ev, void *arg)
     }
     case BLE_GAP_EVENT_ADV_COMPLETE:
         /* the fast window ran out: carry on at the slow interval */
-        if (ev->adv_complete.reason == BLE_HS_ETIMEOUT &&
-            (!ble_connected() || ble_compat))
+        if (ev->adv_complete.reason == BLE_HS_ETIMEOUT)
             ble_advertise();
         break;
     case BLE_GAP_EVENT_DISCONNECT:
+    {
+        uint16_t gone = ev->disconnect.conn.conn_handle;
         d_disc_reason = ev->disconnect.reason;
-        ble_dfu_on_disconnect(ev->disconnect.conn.conn_handle);
+        ble_dfu_on_disconnect(gone);   /* only ends that link's update */
+        hist_ble_disconnect(gone);     /* only ends that link's stream */
+        if (gone == conn_aux) {
+            conn_aux = BLE_HS_CONN_HANDLE_NONE;
+            cp_aux_state = 0;
+            ble_advertise();
+            break;
+        }
         conn_handle = BLE_HS_CONN_HANDLE_NONE;
         sec_pending_at = 0;
         ancs_on_disconnect();
         ams_on_disconnect();
-        hist_ble_disconnect();
         phone_music_reset();
         cp_state = 0;
-        adv_fast_window();
+        if (conn_aux != BLE_HS_CONN_HANDLE_NONE) {
+            /* the phone link went; the other link may be the phone (it
+               came back while nRF Connect held the first slot): it
+               becomes the phone link and gets ANCS, AMS and security */
+            conn_handle = conn_aux;
+            conn_aux = BLE_HS_CONN_HANDLE_NONE;
+            cp_aux_state = 0;
+            ancs_on_connect(conn_handle);
+            ams_on_connect(conn_handle);
+            sec_attempts = 0;
+            sec_pending_at = hal_millis() + 1500;
+            cp_at = hal_millis() + 10000;
+            struct ble_gap_conn_desc cd;
+            if (ble_gap_conn_find(conn_handle, &cd) == 0 &&
+                cd.sec_state.encrypted) {
+                sec_pending_at = 0;
+                ancs_on_enc_ok();
+                ams_on_enc_ok();
+            }
+        } else {
+            adv_fast_window();
+        }
         ble_advertise();
         break;
+    }
     case BLE_GAP_EVENT_SUBSCRIBE:
         d_subscribed++;
         break;
     case BLE_GAP_EVENT_NOTIFY_RX:
         /* incoming GATT notifications on client handles (ANCS NS/DS) */
+        /* only the phone link's: the same handle on the second link is
+           a different attribute */
+        if (ev->notify_rx.conn_handle != conn_handle)
+            break;
         if (!ams_on_notify(ev->notify_rx.attr_handle, ev->notify_rx.om))
             ancs_on_notify(ev->notify_rx.attr_handle, ev->notify_rx.om);
         break;
@@ -349,10 +417,13 @@ static void ble_advertise(void)
         /* iOS holds the link for ANCS, so while connected keep a
            scannable, non-connectable advert up: InfiniLink's scan can
            then find the watch and CoreBluetooth reuses the link */
-        p.conn_mode = ble_connected() ? BLE_GAP_CONN_MODE_NON
-                                      : BLE_GAP_CONN_MODE_UND;
+        p.conn_mode = link_count() >= BLE_LINKS_MAX ? BLE_GAP_CONN_MODE_NON
+                                                    : BLE_GAP_CONN_MODE_UND;
     } else {
-        if (ble_connected())
+        /* 2.4.1: stay connectable while a link is free: with VoidHealth
+           connected, nRF Connect can still find and connect for an
+           update (slow 1 s interval while connected) */
+        if (link_count() >= BLE_LINKS_MAX)
             return;
         ble_gap_adv_set_data(adv, sizeof adv);
         p.conn_mode = BLE_GAP_CONN_MODE_UND;
@@ -544,7 +615,8 @@ void ble_poll(void)
         conn_params_poll(now);
         if (ble_synced && ble_adv_on && now - adv_check_ms > 2000) {
             adv_check_ms = now;
-            if (!ble_gap_adv_active() && (!ble_connected() || ble_compat))
+            if (!ble_gap_adv_active() &&
+                (link_count() < BLE_LINKS_MAX || ble_compat))
                 ble_advertise();
         }
     }
@@ -604,6 +676,8 @@ void ble_set_enabled(int on)
         ble_gap_adv_stop();
         if (ble_connected())
             ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        if (conn_aux != BLE_HS_CONN_HANDLE_NONE)
+            ble_gap_terminate(conn_aux, BLE_ERR_REM_USER_CONN_TERM);
     }
 }
 

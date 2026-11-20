@@ -94,7 +94,7 @@ overrides = {
     'BLE_ROLE_BROADCASTER': '1',
     'BLE_ROLE_CENTRAL': '0',
     'BLE_ROLE_OBSERVER': '0',
-    'BLE_MAX_CONNECTIONS': '1',
+    'BLE_MAX_CONNECTIONS': '2',   # 2.4.1: VoidHealth + nRF Connect (DFU) at once
     'BLE_SM': '1',
     'BLE_SM_SC': '1',
     'BLE_SM_LEGACY': '1',

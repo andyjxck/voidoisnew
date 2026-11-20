@@ -105,6 +105,9 @@ static int cts_access(uint16_t conn, uint16_t attr,
 /* ---- music ----------------------------------------------------------- */
 static struct music ms;
 static uint16_t ms_event_h;
+/* 2.4.1: the link that last wrote the music service gets the button
+   events (with two links up, it is not always the first one) */
+static uint16_t ms_conn = 0xFFFF;
 
 static uint32_t ms_pause_ms;      /* when it last stopped playing, 0 = never */
 
@@ -202,7 +205,9 @@ void phone_music_ams(int playing, const char *artist, const char *track,
 static int ms_access(uint16_t conn, uint16_t attr,
                      struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    (void)conn; (void)attr;
+    (void)attr;
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR)
+        ms_conn = conn;
     int id = (int)(intptr_t)arg;
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
         if (id == 0x02)
@@ -247,7 +252,10 @@ void music_cmd(int c)
     if (!ble_connected() || !ms_event_h)
         return;
     struct os_mbuf *om = ble_hs_mbuf_from_flat(&ev, 1);
-    if (om && ble_gatts_notify_custom(ble_conn_handle(), ms_event_h, om) == 0)
+    uint16_t to = ble_conn_handle();
+    if (ms_conn != 0xFFFF && ble_gap_conn_find(ms_conn, NULL) == 0)
+        to = ms_conn;
+    if (om && ble_gatts_notify_custom(to, ms_event_h, om) == 0)
         ms_event_sent++;
     /* optimistic: show the new state at once, the app confirms */
     if (ev == 0x00 || ev == 0x01) {
